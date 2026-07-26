@@ -776,6 +776,13 @@ impl TranscriptionManager {
     /// `None` so the caller falls back to batch transcription. Frames sent
     /// before the stream begins queue on the channel and are not lost.
     pub fn start_stream(&self) {
+        // Live preview is a local-engine feature. With cloud STT on there is no
+        // loaded model to stream through, and finalize_stream() returning text
+        // would pre-empt the cloud call in actions.rs.
+        if get_settings(&self.app_handle).cloud_stt_enabled {
+            debug!("Live preview skipped: cloud transcription is enabled");
+            return;
+        }
         if self.router.is_open() || self.active_stream_worker.load(Ordering::Acquire) != 0 {
             warn!("start_stream called while a stream worker is already active");
             return;
@@ -1109,6 +1116,39 @@ impl TranscriptionManager {
         .emit(&self.app_handle);
     }
 
+    /// Transcribe via the configured cloud STT provider.
+    ///
+    /// Custom words are sent as decode-time bias where the provider supports
+    /// it, but the local fuzzy-correction pass still runs afterwards — hence
+    /// `custom_words_already_prompted: false`.
+    fn transcribe_cloud(&self, audio: &[f32], settings: &AppSettings) -> Result<String> {
+        let provider_id = settings.cloud_stt_provider_id.as_str();
+        if provider_id != crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
+            return Err(anyhow::anyhow!(
+                "Unknown cloud transcription provider '{}'",
+                provider_id
+            ));
+        }
+
+        let req = crate::stt_cloud::CloudSttRequest {
+            api_key: settings
+                .cloud_stt_api_keys
+                .get(provider_id)
+                .cloned()
+                .unwrap_or_default(),
+            model: settings
+                .cloud_stt_models
+                .get(provider_id)
+                .cloned()
+                .unwrap_or_else(|| crate::stt_cloud::DEEPGRAM_DEFAULT_MODEL.to_string()),
+            language: settings.selected_language.clone(),
+            keyterms: settings.custom_words.clone(),
+        };
+
+        let raw = crate::stt_cloud::transcribe_deepgram_blocking(&req, audio)?;
+        Ok(post_process_transcription_text(raw, settings, false))
+    }
+
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
@@ -1129,6 +1169,19 @@ impl TranscriptionManager {
             debug!("Empty audio vector");
             self.maybe_unload_immediately("empty audio");
             return Ok(String::new());
+        }
+
+        // Cloud STT short-circuits the local engine entirely: no model needs to
+        // be loaded, and the returned text re-enters the normal pipeline below
+        // via `post_process_transcription_text`.
+        {
+            let settings = get_settings(&self.app_handle);
+            if settings.cloud_stt_enabled {
+                let result = self.transcribe_cloud(&audio, &settings);
+                self.maybe_unload_immediately("cloud transcription");
+                debug!("Cloud transcription took {:?}", st.elapsed());
+                return result;
+            }
         }
 
         // Check if model is loaded, if not try to load it

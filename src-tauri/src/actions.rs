@@ -471,7 +471,11 @@ impl ShortcutAction for TranscribeAction {
 
         // Load ASR model and VAD model in parallel
         let kickoff_started = Instant::now();
-        tm.initiate_model_load();
+        // Cloud transcription never touches the local engine, so don't pay the
+        // load (or require a downloaded model at all).
+        if !get_settings(app).cloud_stt_enabled {
+            tm.initiate_model_load();
+        }
         let rm_clone = Arc::clone(&rm);
         std::thread::spawn(move || {
             if let Err(e) = rm_clone.preload_vad() {
@@ -497,10 +501,13 @@ impl ShortcutAction for TranscribeAction {
         // Use the app-facing model capability as the single pre-recording source
         // for live streaming decisions. Unknown support is represented as false
         // until the model registry is updated by discovery or runtime load.
-        let model_supports_streaming = selected_model_info
-            .as_ref()
-            .map(|m| m.supports_streaming)
-            .unwrap_or(false);
+        // Cloud transcription has no local engine to stream through, so it always
+        // takes the non-streaming path (compact overlay, batch transcribe).
+        let model_supports_streaming = !settings.cloud_stt_enabled
+            && selected_model_info
+                .as_ref()
+                .map(|m| m.supports_streaming)
+                .unwrap_or(false);
         let vad_policy = if !settings.vad_enabled {
             VadPolicy::Disabled
         } else if model_supports_streaming {

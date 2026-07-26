@@ -11,6 +11,7 @@ import {
   supportsLanguageCode,
 } from "@/lib/constants/languages.ts";
 import type { ModelInfo } from "@/bindings";
+import { CloudTranscription } from "../CloudTranscription";
 
 // check if model supports a language based on its supported_languages list
 const modelSupportsLanguage = (model: ModelInfo, langCode: string): boolean => {
@@ -233,6 +234,9 @@ export const ModelsSettings: React.FC = () => {
           {t("settings.models.description")}
         </p>
       </div>
+
+      {/* Cloud STT bypasses everything below it — surface it before the catalog */}
+      <CloudTranscription />
 
       {/* Search bar — filter the catalog by name or description */}
       <div className="relative">

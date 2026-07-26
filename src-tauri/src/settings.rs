@@ -423,6 +423,16 @@ pub struct AppSettings {
     pub post_process_prompts: Vec<LLMPrompt>,
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
+    /// When enabled, audio is transcribed by a hosted STT API instead of the
+    /// local engine. Off by default — Handy stays offline unless asked.
+    #[serde(default)]
+    pub cloud_stt_enabled: bool,
+    #[serde(default = "default_cloud_stt_provider_id")]
+    pub cloud_stt_provider_id: String,
+    #[serde(default = "default_cloud_stt_api_keys")]
+    pub cloud_stt_api_keys: SecretMap,
+    #[serde(default = "default_cloud_stt_models")]
+    pub cloud_stt_models: HashMap<String, String>,
     #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
@@ -684,6 +694,38 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
     providers
 }
 
+/// Cloud STT providers we know how to talk to. Kept as a list (rather than a
+/// bare Deepgram constant) so adding a second backend is a one-line change
+/// here plus a branch in `stt_cloud`.
+fn cloud_stt_provider_ids() -> Vec<String> {
+    vec![crate::stt_cloud::DEEPGRAM_PROVIDER_ID.to_string()]
+}
+
+fn default_cloud_stt_provider_id() -> String {
+    crate::stt_cloud::DEEPGRAM_PROVIDER_ID.to_string()
+}
+
+fn default_cloud_stt_api_keys() -> SecretMap {
+    let mut map = HashMap::new();
+    for id in cloud_stt_provider_ids() {
+        map.insert(id, String::new());
+    }
+    SecretMap(map)
+}
+
+fn default_cloud_stt_models() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for id in cloud_stt_provider_ids() {
+        let default_model = if id == crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
+            crate::stt_cloud::DEEPGRAM_DEFAULT_MODEL.to_string()
+        } else {
+            String::new()
+        };
+        map.insert(id, default_model);
+    }
+    map
+}
+
 fn default_post_process_api_keys() -> SecretMap {
     let mut map = HashMap::new();
     for provider in default_post_process_providers() {
@@ -875,6 +917,10 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
+        cloud_stt_enabled: false,
+        cloud_stt_provider_id: default_cloud_stt_provider_id(),
+        cloud_stt_api_keys: default_cloud_stt_api_keys(),
+        cloud_stt_models: default_cloud_stt_models(),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),

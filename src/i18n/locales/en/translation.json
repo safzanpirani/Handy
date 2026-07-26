@@ -568,6 +568,22 @@
           "details": "Handy's local speech-to-text is built on transcribe.cpp and ggml. Thanks to the amazing work by Georgi Gerganov and contributors."
         }
       }
+    },
+    "cloudTranscription": {
+      "title": "Cloud Transcription",
+      "toggle": {
+        "label": "Use cloud transcription",
+        "description": "Send recorded audio to a hosted speech-to-text API (Deepgram) instead of running a model locally. No model download is needed, but every dictation requires a network connection and the audio leaves your machine. Live preview is unavailable in this mode."
+      },
+      "apiKey": {
+        "title": "Deepgram API key",
+        "description": "Your Deepgram API key. Stored locally with your other settings and sent only to api.deepgram.com.",
+        "placeholder": "Deepgram API key"
+      },
+      "model": {
+        "title": "Model",
+        "description": "Deepgram model id, e.g. nova-3. Custom words are sent as keyterm bias on nova-3 models."
+      }
     }
   },
   "footer": {
