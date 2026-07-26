@@ -172,8 +172,12 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     // - custom: top-level reasoning_effort (works for local OpenAI-compat servers)
     // - openrouter: nested reasoning object; exclude:true also keeps reasoning text
     //   out of the response so it can't pollute structured-output JSON parsing
+    // - groq: only its gpt-oss models accept reasoning_effort at all (others
+    //   400 on the field), and they default to medium — which is slower and
+    //   paraphrases more than this task wants, so pin them to "low"
     let (reasoning_effort, reasoning) = match provider.id.as_str() {
         "custom" => (Some("none".to_string()), None),
+        "groq" if model.starts_with("openai/gpt-oss") => (Some("low".to_string()), None),
         "openrouter" => (
             None,
             Some(crate::llm_client::ReasoningConfig {
