@@ -424,8 +424,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
     /// When enabled, audio is transcribed by a hosted STT API instead of the
-    /// local engine. Off by default — Handy stays offline unless asked.
-    #[serde(default)]
+    /// local engine. Off by default unless a key was baked in at build time.
+    #[serde(default = "default_cloud_stt_enabled")]
     pub cloud_stt_enabled: bool,
     #[serde(default = "default_cloud_stt_provider_id")]
     pub cloud_stt_provider_id: String,
@@ -694,6 +694,18 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
     providers
 }
 
+/// A Deepgram key may be baked in at build time via the HANDY_DEEPGRAM_API_KEY
+/// environment variable, so a build handed to someone else works with no setup.
+/// Unset in normal builds, in which case the user supplies the key in Settings.
+///
+/// Prefer passing this from a CI secret rather than committing a literal: the
+/// value is readable in the shipped binary either way, but a key in source is
+/// also a key in every clone and fork of the repo.
+pub const BAKED_DEEPGRAM_API_KEY: &str = match option_env!("HANDY_DEEPGRAM_API_KEY") {
+    Some(key) => key,
+    None => "",
+};
+
 /// Cloud STT providers we know how to talk to. Kept as a list (rather than a
 /// bare Deepgram constant) so adding a second backend is a one-line change
 /// here plus a branch in `stt_cloud`.
@@ -708,9 +720,20 @@ fn default_cloud_stt_provider_id() -> String {
 fn default_cloud_stt_api_keys() -> SecretMap {
     let mut map = HashMap::new();
     for id in cloud_stt_provider_ids() {
-        map.insert(id, String::new());
+        let key = if id == crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
+            BAKED_DEEPGRAM_API_KEY.to_string()
+        } else {
+            String::new()
+        };
+        map.insert(id, key);
     }
     SecretMap(map)
+}
+
+/// A build carrying a baked-in key is meant to work out of the box, so cloud
+/// transcription starts on. Without one, Handy stays local by default.
+fn default_cloud_stt_enabled() -> bool {
+    !BAKED_DEEPGRAM_API_KEY.is_empty()
 }
 
 fn default_cloud_stt_models() -> HashMap<String, String> {
@@ -917,7 +940,7 @@ pub fn get_default_settings() -> AppSettings {
         post_process_models: default_post_process_models(),
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
-        cloud_stt_enabled: false,
+        cloud_stt_enabled: default_cloud_stt_enabled(),
         cloud_stt_provider_id: default_cloud_stt_provider_id(),
         cloud_stt_api_keys: default_cloud_stt_api_keys(),
         cloud_stt_models: default_cloud_stt_models(),

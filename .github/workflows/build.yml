@@ -50,6 +50,10 @@ on:
 
 env:
   TSC_VERSION: "0.9.0"
+  # Fork-only: bakes a Deepgram key into the binary so a build handed to
+  # someone else needs no setup. Empty in upstream/PR builds, where the
+  # secret is absent and the app falls back to asking for a key.
+  HANDY_DEEPGRAM_API_KEY: ${{ secrets.HANDY_DEEPGRAM_API_KEY }}
 
 jobs:
   build:
