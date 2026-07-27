@@ -505,8 +505,22 @@ jobs:
           $path = "src-tauri/tauri.conf.json"
           $conf = Get-Content $path -Raw | ConvertFrom-Json
           $conf.bundle.windows.PSObject.Properties.Remove('signCommand')
+          # An unsigned build has no updater key either. Leaving
+          # createUpdaterArtifacts on makes the bundler try to sign with the
+          # empty TAURI_SIGNING_PRIVATE_KEY and abort ("Missing comment in
+          # secret key").
+          $conf.bundle.createUpdaterArtifacts = $false
+          # The stock endpoint points at upstream's releases, so a fork build
+          # would offer an "update" that replaces itself with official Handy.
+          # Repoint at this fork, which publishes no latest.json: the check
+          # simply finds nothing instead of clobbering the install.
+          if ($conf.plugins.updater) {
+            $conf.plugins.updater.endpoints = @(
+              "https://github.com/safzanpirani/Handy/releases/latest/download/latest.json"
+            )
+          }
           $conf | ConvertTo-Json -Depth 100 | Set-Content $path -Encoding utf8
-          Write-Host "signCommand removed; bundling unsigned"
+          Write-Host "unsigned build: signCommand + updater artifacts disabled"
 
       - name: Build with Tauri
         uses: tauri-apps/tauri-action@v0
