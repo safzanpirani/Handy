@@ -494,6 +494,20 @@ jobs:
           sudo cp -vL "$LIBDIR"/libtranscribe.so* "$LIBDIR"/libggml*.so* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
 
+      # tauri.conf.json pins a signCommand for upstream's Azure Trusted Signing
+      # account. A fork has no access to it, and the bundler aborts with
+      # "program not found" AFTER the (slow) compile succeeds. Drop the key so
+      # unsigned builds still produce an installer instead of dying at bundling.
+      - name: Remove Windows signCommand for unsigned builds
+        if: contains(inputs.platform, 'windows') && !inputs.sign-binaries
+        shell: pwsh
+        run: |
+          $path = "src-tauri/tauri.conf.json"
+          $conf = Get-Content $path -Raw | ConvertFrom-Json
+          $conf.bundle.windows.PSObject.Properties.Remove('signCommand')
+          $conf | ConvertTo-Json -Depth 100 | Set-Content $path -Encoding utf8
+          Write-Host "signCommand removed; bundling unsigned"
+
       - name: Build with Tauri
         uses: tauri-apps/tauri-action@v0
         env:
