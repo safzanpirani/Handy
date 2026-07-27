@@ -15,8 +15,11 @@ concurrency:
 
 jobs:
   windows:
+    # Must match the reusable workflow's own `contents: write` — a called
+    # workflow cannot be granted more than its caller holds, and anything less
+    # fails the run at startup.
     permissions:
-      contents: read
+      contents: write
     uses: ./.github/workflows/build.yml
     with:
       platform: "windows-latest"
