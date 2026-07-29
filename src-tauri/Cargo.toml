@@ -54,7 +54,13 @@ rubato = "0.16.2"
 hound = "3.5.1"
 log = "0.4.25"
 env_filter = "0.1.0"
-tokio = { version = "1.43.0", features = ["rt", "net", "time"] }
+tokio = { version = "1.43.0", features = ["rt", "net", "time", "sync", "macros", "io-util"] }
+# Cloud STT streaming (Deepgram live WebSocket). native-tls reuses the TLS
+# stack reqwest already links, so this adds no second crypto backend.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+  "connect",
+  "native-tls",
+] }
 vad-rs = { git = "https://github.com/cjpais/vad-rs", default-features = false }
 enigo = "0.6.1"
 rodio = { git = "https://github.com/cjpais/rodio.git" }

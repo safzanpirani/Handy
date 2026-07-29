@@ -505,21 +505,22 @@ impl ShortcutAction for TranscribeAction {
         // Use the app-facing model capability as the single pre-recording source
         // for live streaming decisions. Unknown support is represented as false
         // until the model registry is updated by discovery or runtime load.
-        // Cloud transcription has no local engine to stream through, so it always
-        // takes the non-streaming path (compact overlay, batch transcribe).
-        let model_supports_streaming = !settings.cloud_stt_enabled
-            && selected_model_info
-                .as_ref()
-                .map(|m| m.supports_streaming)
-                .unwrap_or(false);
+        let model_supports_streaming = selected_model_info
+            .as_ref()
+            .map(|m| m.supports_streaming)
+            .unwrap_or(false);
+        // Cloud transcription streams over a provider socket instead of a local
+        // engine, so it takes the live path regardless of the selected model —
+        // there may not even be one downloaded.
+        let use_live_stream = settings.cloud_stt_enabled || model_supports_streaming;
         let vad_policy = if !settings.vad_enabled {
             VadPolicy::Disabled
-        } else if model_supports_streaming {
+        } else if use_live_stream {
             VadPolicy::Streaming
         } else {
             VadPolicy::Offline
         };
-        if model_supports_streaming {
+        if use_live_stream {
             tm.start_stream();
         }
         let plan_elapsed = plan_started.elapsed();
@@ -529,7 +530,7 @@ impl ShortcutAction for TranscribeAction {
         // pill instead of an oversized transparent live window.
         let overlay_started = Instant::now();
         match settings.overlay_style {
-            OverlayStyle::Live if model_supports_streaming => utils::show_streaming_overlay(app),
+            OverlayStyle::Live if use_live_stream => utils::show_streaming_overlay(app),
             OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
             OverlayStyle::None => {} // show_overlay_state no-ops on None anyway
         }

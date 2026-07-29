@@ -10,7 +10,7 @@
 //! provider-shaped so a second backend slots in beside it.
 
 use anyhow::{anyhow, Result};
-use log::debug;
+use log::{debug, warn};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 use std::time::Duration;
@@ -192,6 +192,360 @@ pub fn transcribe_deepgram_blocking(req: &CloudSttRequest, audio: &[f32]) -> Res
     .map_err(|_| anyhow!("Deepgram request thread panicked"))?
 }
 
+/* ── Streaming (Deepgram live WebSocket) ─────────────────────────────────── */
+
+const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
+/// How long to wait for the WebSocket handshake before giving up and letting
+/// the caller fall back to the batch endpoint.
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for Deepgram to flush its finals after `CloseStream`.
+/// Measured round-trip is ~1.5s; this is a generous ceiling that still leaves
+/// headroom under the caller's own 30s finalize timeout.
+const WS_FINALIZE_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// Messages pushed to the socket-owning task.
+enum WsCmd {
+    Audio(Vec<u8>),
+    /// Ask Deepgram to flush; the task replies on the result channel.
+    Close,
+}
+
+/// A live Deepgram transcription session.
+///
+/// The batch endpoint (`transcribe_deepgram`) only starts working once the
+/// recording is over, and measured 4–8s of server-side latency before the first
+/// byte — the whole reason this exists. Here the socket is opened at
+/// record-start and fed as the user speaks, so by the time they release the key
+/// Deepgram has already transcribed everything but the last moment of audio.
+///
+/// Owns an OS thread with a private current-thread runtime, for the same reason
+/// [`transcribe_deepgram_blocking`] does: the callers are synchronous and may
+/// themselves be running on a Tauri runtime worker.
+pub struct DeepgramLiveStream {
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<WsCmd>,
+    /// Final transcript (or the error that killed the session), sent exactly
+    /// once when the socket task finishes.
+    result_rx: std::sync::mpsc::Receiver<Result<String>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl DeepgramLiveStream {
+    /// Open the socket. Blocks until the handshake completes (or fails), so a
+    /// returned stream is ready to accept audio.
+    ///
+    /// `on_interim` is invoked from the socket task for every result Deepgram
+    /// sends, with `(committed, tentative)` — the finalized prefix so far and
+    /// the volatile tail — matching the shape the streaming overlay expects.
+    pub fn connect(
+        req: &CloudSttRequest,
+        on_interim: impl Fn(&str, &str) + Send + 'static,
+    ) -> Result<Self> {
+        if req.api_key.trim().is_empty() {
+            return Err(anyhow!(
+                "Deepgram API key is not set. Add it in Settings → Transcription."
+            ));
+        }
+
+        let url = build_ws_url(req)?;
+        let api_key = req.api_key.clone();
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WsCmd>();
+        // Two hops: `ready` reports handshake success so `connect` can block,
+        // `result` carries the final transcript.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<String>>();
+
+        let handle = std::thread::Builder::new()
+            .name("deepgram-live".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(anyhow!("Failed to start WS runtime: {}", e)));
+                        return;
+                    }
+                };
+                rt.block_on(run_ws_session(
+                    url,
+                    api_key,
+                    cmd_rx,
+                    ready_tx,
+                    result_tx,
+                    on_interim,
+                ));
+            })
+            .map_err(|e| anyhow!("Failed to spawn Deepgram stream thread: {}", e))?;
+
+        match ready_rx.recv_timeout(WS_CONNECT_TIMEOUT) {
+            Ok(Ok(())) => Ok(Self {
+                cmd_tx,
+                result_rx,
+                handle: Some(handle),
+            }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow!(
+                "Timed out after {:?} connecting to Deepgram",
+                WS_CONNECT_TIMEOUT
+            )),
+        }
+    }
+
+    /// Push one frame of mono f32 audio. Non-blocking; a dead socket is
+    /// silently dropped here and surfaced by [`finalize`](Self::finalize).
+    pub fn feed(&self, pcm: &[f32]) {
+        let _ = self.cmd_tx.send(WsCmd::Audio(to_linear16(pcm)));
+    }
+
+    /// Flush the stream and return the full transcript.
+    pub fn finalize(mut self) -> Result<String> {
+        let _ = self.cmd_tx.send(WsCmd::Close);
+        let out = match self.result_rx.recv_timeout(WS_FINALIZE_TIMEOUT) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(anyhow!("Deepgram stream ended without a transcript"))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(anyhow!(
+                "Timed out after {:?} waiting for Deepgram to finalize",
+                WS_FINALIZE_TIMEOUT
+            )),
+        };
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        out
+    }
+}
+
+impl Drop for DeepgramLiveStream {
+    fn drop(&mut self) {
+        // Cancelled mid-recording: dropping the sender ends the task's recv
+        // loop, which closes the socket. The thread is detached rather than
+        // joined so cancel stays instant.
+        if let Some(handle) = self.handle.take() {
+            drop(handle);
+        }
+    }
+}
+
+fn build_ws_url(req: &CloudSttRequest) -> Result<String> {
+    let model = if req.model.trim().is_empty() {
+        DEEPGRAM_DEFAULT_MODEL
+    } else {
+        req.model.trim()
+    };
+
+    let mut url = reqwest::Url::parse(DEEPGRAM_WS_URL)?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("model", model);
+        q.append_pair("encoding", "linear16");
+        q.append_pair("sample_rate", &SAMPLE_RATE.to_string());
+        q.append_pair("channels", "1");
+        q.append_pair("language", &deepgram_language(&req.language));
+        q.append_pair("smart_format", "true");
+        q.append_pair("punctuate", "true");
+        // Interim results drive the live overlay; without them nothing appears
+        // until the user stops speaking.
+        q.append_pair("interim_results", "true");
+
+        if model.starts_with("nova-3") {
+            for term in req
+                .keyterms
+                .iter()
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .take(MAX_KEYTERMS)
+            {
+                q.append_pair("keyterm", term);
+            }
+        }
+    }
+    Ok(url.to_string())
+}
+
+/// One `Results` frame from the live API.
+#[derive(Debug, Deserialize)]
+struct DeepgramLiveMessage {
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
+    channel: Option<DeepgramChannel>,
+    #[serde(default)]
+    is_final: bool,
+    /// Present on `type: "Error"` frames.
+    description: Option<String>,
+}
+
+/// Accumulates Deepgram's interim/final result frames into a transcript.
+///
+/// The live API sends a stream of interim hypotheses for the current utterance
+/// and then one `is_final` frame that supersedes them all. So finals append to
+/// a committed prefix, and interims only ever replace the volatile tail.
+#[derive(Default)]
+struct LiveTranscript {
+    committed: Vec<String>,
+    tentative: String,
+}
+
+impl LiveTranscript {
+    /// Returns true if anything changed and the caller should emit an update.
+    fn apply(&mut self, transcript: &str, is_final: bool) -> bool {
+        let text = transcript.trim();
+        if is_final {
+            // A final with no words is Deepgram closing out silence — it still
+            // clears the tentative tail.
+            let had_tentative = !self.tentative.is_empty();
+            self.tentative.clear();
+            if text.is_empty() {
+                return had_tentative;
+            }
+            self.committed.push(text.to_string());
+            true
+        } else {
+            if self.tentative == text {
+                return false;
+            }
+            self.tentative = text.to_string();
+            true
+        }
+    }
+
+    fn committed(&self) -> String {
+        self.committed.join(" ")
+    }
+
+    fn display(&self) -> String {
+        let mut out = self.committed();
+        if !self.tentative.is_empty() {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&self.tentative);
+        }
+        out.trim().to_string()
+    }
+}
+
+async fn run_ws_session(
+    url: String,
+    api_key: String,
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<WsCmd>,
+    ready_tx: std::sync::mpsc::Sender<Result<()>>,
+    result_tx: std::sync::mpsc::Sender<Result<String>>,
+    on_interim: impl Fn(&str, &str),
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    let socket = async {
+        let mut request = url
+            .into_client_request()
+            .map_err(|e| anyhow!("Invalid Deepgram URL: {}", e))?;
+        request.headers_mut().insert(
+            "Authorization",
+            format!("Token {}", api_key)
+                .parse()
+                .map_err(|_| anyhow!("Deepgram API key contains invalid characters"))?,
+        );
+        tokio_tungstenite::connect_async(request)
+            .await
+            .map(|(socket, _)| socket)
+            .map_err(|e| anyhow!("Deepgram WebSocket connect failed: {}", e))
+    }
+    .await;
+
+    let mut socket = match socket {
+        Ok(s) => {
+            let _ = ready_tx.send(Ok(()));
+            s
+        }
+        Err(e) => {
+            let _ = ready_tx.send(Err(e));
+            return;
+        }
+    };
+    debug!("Deepgram live stream connected");
+
+    let mut transcript = LiveTranscript::default();
+    // Set once `CloseStream` is sent: from then on we only drain replies.
+    let mut closing = false;
+    let mut outcome: Option<Result<String>> = None;
+
+    loop {
+        tokio::select! {
+            // Bias toward draining the socket so interim results stay timely
+            // even while frames are arriving.
+            biased;
+
+            incoming = socket.next() => {
+                match incoming {
+                    Some(Ok(Message::Text(payload))) => {
+                        match serde_json::from_str::<DeepgramLiveMessage>(&payload) {
+                            Ok(msg) => {
+                                match msg.msg_type.as_deref() {
+                                    Some("Error") => {
+                                        outcome = Some(Err(anyhow!(
+                                            "Deepgram stream error: {}",
+                                            msg.description.unwrap_or_else(|| payload.to_string())
+                                        )));
+                                        break;
+                                    }
+                                    // Metadata is the last frame after CloseStream.
+                                    Some("Metadata") => break,
+                                    _ => {
+                                        let text = msg
+                                            .channel
+                                            .and_then(|c| c.alternatives.into_iter().next())
+                                            .and_then(|a| a.transcript)
+                                            .unwrap_or_default();
+                                        if transcript.apply(&text, msg.is_final) {
+                                            on_interim(&transcript.committed(), &transcript.tentative);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => warn!("Unparseable Deepgram frame: {} ({})", e, payload),
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        outcome = Some(Err(anyhow!("Deepgram WebSocket error: {}", e)));
+                        break;
+                    }
+                }
+            }
+
+            cmd = cmd_rx.recv(), if !closing => {
+                match cmd {
+                    Some(WsCmd::Audio(bytes)) => {
+                        if let Err(e) = socket.send(Message::Binary(bytes.into())).await {
+                            outcome = Some(Err(anyhow!("Failed to send audio to Deepgram: {}", e)));
+                            break;
+                        }
+                    }
+                    Some(WsCmd::Close) => {
+                        closing = true;
+                        let close_frame = r#"{"type":"CloseStream"}"#.to_string();
+                        if let Err(e) = socket.send(Message::Text(close_frame.into())).await {
+                            outcome = Some(Err(anyhow!("Failed to close Deepgram stream: {}", e)));
+                            break;
+                        }
+                    }
+                    // Sender dropped without finalizing (cancelled recording).
+                    None => break,
+                }
+            }
+        }
+    }
+
+    let _ = socket.close(None).await;
+    // An empty transcript is a legitimate result (silence), not an error —
+    // same contract as the batch path.
+    let _ = result_tx.send(outcome.unwrap_or_else(|| Ok(transcript.display())));
+}
+
 fn parse_transcript(body: &str) -> Result<String> {
     let parsed: DeepgramResponse = serde_json::from_str(body)
         .map_err(|e| anyhow!("Could not parse Deepgram response: {} (body: {})", e, body))?;
@@ -291,6 +645,86 @@ mod tests {
         assert_eq!(parse_transcript(body).unwrap(), "");
         let no_channels = r#"{"results":{"channels":[]}}"#;
         assert_eq!(parse_transcript(no_channels).unwrap(), "");
+    }
+
+    #[test]
+    fn ws_url_is_wss_and_requests_interim_results() {
+        let url = build_ws_url(&req()).unwrap();
+        assert!(url.starts_with("wss://api.deepgram.com/v1/listen"));
+        assert!(url.contains("interim_results=true"));
+        assert!(url.contains("encoding=linear16"));
+        assert!(url.contains("sample_rate=16000"));
+        assert!(url.contains("language=multi"));
+    }
+
+    #[test]
+    fn interims_replace_the_tail_and_finals_append() {
+        let mut t = LiveTranscript::default();
+
+        assert!(t.apply("hello", false));
+        assert_eq!(t.display(), "hello");
+        // An identical interim is not a change — no redundant overlay emit.
+        assert!(!t.apply("hello", false));
+
+        // The interim is a hypothesis for the current utterance, so a longer
+        // one replaces it rather than appending.
+        assert!(t.apply("hello wor", false));
+        assert_eq!(t.display(), "hello wor");
+
+        // The final supersedes every interim for that utterance.
+        assert!(t.apply("hello world", true));
+        assert_eq!(t.display(), "hello world");
+        assert_eq!(t.committed(), "hello world");
+        assert_eq!(t.tentative, "");
+
+        // The next utterance appends after the committed prefix.
+        assert!(t.apply("how are you", false));
+        assert_eq!(t.display(), "hello world how are you");
+        assert!(t.apply("how are you?", true));
+        assert_eq!(t.display(), "hello world how are you?");
+    }
+
+    #[test]
+    fn empty_final_clears_a_stale_tentative_tail() {
+        // Deepgram closes out a silence-only segment with an empty final; the
+        // tail it supersedes must not survive into the transcript.
+        let mut t = LiveTranscript::default();
+        t.apply("uh", false);
+        assert!(t.apply("", true));
+        assert_eq!(t.display(), "");
+        // ...and a second empty final is not a change worth emitting.
+        assert!(!t.apply("", true));
+    }
+
+    #[test]
+    fn silent_stream_finalizes_to_empty_string() {
+        assert_eq!(LiveTranscript::default().display(), "");
+    }
+
+    #[test]
+    fn live_results_frame_parses() {
+        let frame = r#"{"type":"Results","channel":{"alternatives":[{"transcript":"hello"}]},"is_final":true}"#;
+        let msg: DeepgramLiveMessage = serde_json::from_str(frame).unwrap();
+        assert_eq!(msg.msg_type.as_deref(), Some("Results"));
+        assert!(msg.is_final);
+        assert_eq!(
+            msg.channel.unwrap().alternatives[0].transcript.as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn metadata_and_error_frames_parse_without_a_channel() {
+        // Both are terminal frames; neither carries a transcript.
+        let meta: DeepgramLiveMessage =
+            serde_json::from_str(r#"{"type":"Metadata","duration":1.5}"#).unwrap();
+        assert_eq!(meta.msg_type.as_deref(), Some("Metadata"));
+        assert!(meta.channel.is_none());
+        assert!(!meta.is_final);
+
+        let err: DeepgramLiveMessage =
+            serde_json::from_str(r#"{"type":"Error","description":"bad key"}"#).unwrap();
+        assert_eq!(err.description.as_deref(), Some("bad key"));
     }
 
     #[test]

@@ -776,13 +776,6 @@ impl TranscriptionManager {
     /// `None` so the caller falls back to batch transcription. Frames sent
     /// before the stream begins queue on the channel and are not lost.
     pub fn start_stream(&self) {
-        // Live preview is a local-engine feature. With cloud STT on there is no
-        // loaded model to stream through, and finalize_stream() returning text
-        // would pre-empt the cloud call in actions.rs.
-        if get_settings(&self.app_handle).cloud_stt_enabled {
-            debug!("Live preview skipped: cloud transcription is enabled");
-            return;
-        }
         if self.router.is_open() || self.active_stream_worker.load(Ordering::Acquire) != 0 {
             warn!("start_stream called while a stream worker is already active");
             return;
@@ -800,7 +793,109 @@ impl TranscriptionManager {
         self.stream_active.store(false, Ordering::Release);
 
         let manager = self.clone();
-        thread::spawn(move || manager.run_stream_worker(rx, worker_id));
+        // Cloud streaming shares the router/finalize handshake but drives a
+        // Deepgram socket instead of the local engine.
+        let cloud = get_settings(&self.app_handle).cloud_stt_enabled;
+        thread::spawn(move || {
+            if cloud {
+                manager.run_cloud_stream_worker(rx, worker_id)
+            } else {
+                manager.run_stream_worker(rx, worker_id)
+            }
+        });
+    }
+
+    /// Streaming worker for cloud STT: opens the provider's live socket at
+    /// record-start and feeds frames as they arrive, so only the last moment of
+    /// audio is still outstanding when the user releases the key.
+    ///
+    /// The batch endpoint this replaces could not be made fast — it has 4–8s of
+    /// server-side latency before it emits anything, and it can't even begin
+    /// until the recording is over.
+    ///
+    /// Any failure (no key, handshake refused, socket dropped) drains the
+    /// channel and replies `None`, so `actions.rs` falls back to a batch
+    /// transcription of the same audio rather than losing the dictation.
+    fn run_cloud_stream_worker(&self, rx: mpsc::Receiver<StreamCmd>, worker_id: u64) {
+        // Never leases the engine; the guard only clears the worker/active flags.
+        let _worker = StreamWorkerGuard {
+            worker_id,
+            active_stream_worker: Arc::clone(&self.active_stream_worker),
+            active_engine_lease: Arc::clone(&self.active_engine_lease),
+            stream_active: Arc::clone(&self.stream_active),
+        };
+
+        let settings = get_settings(&self.app_handle);
+        let req = match self.cloud_request(&settings) {
+            Ok(req) => req,
+            Err(e) => {
+                warn!("Cloud streaming unavailable: {}; using batch transcription", e);
+                self.router.clear();
+                drain_until_finalize(rx);
+                return;
+            }
+        };
+
+        let connect_start = Instant::now();
+        let manager = self.clone();
+        let stream = match crate::stt_cloud::DeepgramLiveStream::connect(
+            &req,
+            move |committed, tentative| manager.emit_stream_text(committed, tentative),
+        ) {
+            Ok(stream) => stream,
+            Err(e) => {
+                warn!(
+                    "Cloud stream connect failed: {}; falling back to batch transcription",
+                    e
+                );
+                self.router.clear();
+                drain_until_finalize(rx);
+                return;
+            }
+        };
+        info!(
+            "Cloud streaming transcription started (model '{}', connected in {:?})",
+            req.model,
+            connect_start.elapsed()
+        );
+        self.stream_active.store(true, Ordering::Release);
+        self.touch_activity();
+
+        while let Ok(cmd) = rx.recv() {
+            match cmd {
+                StreamCmd::Feed(pcm) => {
+                    self.touch_activity();
+                    stream.feed(&pcm);
+                }
+                StreamCmd::Finalize(reply) => {
+                    let finalize_start = Instant::now();
+                    let result = match stream.finalize() {
+                        Ok(text) => {
+                            info!(
+                                "Cloud stream finalized in {:?} ({} chars)",
+                                finalize_start.elapsed(),
+                                text.len()
+                            );
+                            Some(text)
+                        }
+                        Err(e) => {
+                            error!(
+                                "Cloud stream finalize failed: {}; falling back to batch transcription",
+                                e
+                            );
+                            None
+                        }
+                    };
+                    let _ = reply.send(result);
+                    return;
+                }
+                StreamCmd::Cancel => {
+                    // Dropping the stream closes the socket without waiting.
+                    drop(stream);
+                    return;
+                }
+            }
+        }
     }
 
     fn run_stream_worker(&self, rx: mpsc::Receiver<StreamCmd>, worker_id: u64) {
@@ -1122,6 +1217,13 @@ impl TranscriptionManager {
     /// it, but the local fuzzy-correction pass still runs afterwards — hence
     /// `custom_words_already_prompted: false`.
     fn transcribe_cloud(&self, audio: &[f32], settings: &AppSettings) -> Result<String> {
+        let req = self.cloud_request(settings)?;
+        let raw = crate::stt_cloud::transcribe_deepgram_blocking(&req, audio)?;
+        Ok(post_process_transcription_text(raw, settings, false))
+    }
+
+    /// Build the provider request shared by the streaming and batch cloud paths.
+    fn cloud_request(&self, settings: &AppSettings) -> Result<crate::stt_cloud::CloudSttRequest> {
         let provider_id = settings.cloud_stt_provider_id.as_str();
         if provider_id != crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
             return Err(anyhow::anyhow!(
@@ -1130,7 +1232,7 @@ impl TranscriptionManager {
             ));
         }
 
-        let req = crate::stt_cloud::CloudSttRequest {
+        Ok(crate::stt_cloud::CloudSttRequest {
             api_key: settings
                 .cloud_stt_api_keys
                 .get(provider_id)
@@ -1143,10 +1245,7 @@ impl TranscriptionManager {
                 .unwrap_or_else(|| crate::stt_cloud::DEEPGRAM_DEFAULT_MODEL.to_string()),
             language: settings.selected_language.clone(),
             keyterms: settings.custom_words.clone(),
-        };
-
-        let raw = crate::stt_cloud::transcribe_deepgram_blocking(&req, audio)?;
-        Ok(post_process_transcription_text(raw, settings, false))
+        })
     }
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
