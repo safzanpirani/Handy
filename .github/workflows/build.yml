@@ -522,7 +522,34 @@ jobs:
           $conf | ConvertTo-Json -Depth 100 | Set-Content $path -Encoding utf8
           Write-Host "unsigned build: signCommand + updater artifacts disabled"
 
-      - name: Build with Tauri
+      # macOS counterpart of the Windows fixup above. The bundle already asks for
+      # ad-hoc signing ("signingIdentity": "-"), which needs no certificate --
+      # but updater artifacts still get signed with TAURI_SIGNING_PRIVATE_KEY,
+      # which a fork does not have.
+      - name: Disable updater artifacts for unsigned builds (macOS)
+        if: contains(inputs.platform, 'macos') && !inputs.sign-binaries
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import json
+          path = "src-tauri/tauri.conf.json"
+          with open(path) as f:
+              conf = json.load(f)
+          conf["bundle"]["createUpdaterArtifacts"] = False
+          # Same reasoning as the Windows step: the stock endpoint points at
+          # upstream, so a fork build would offer an "update" that replaces
+          # itself with official Handy.
+          if conf.get("plugins", {}).get("updater"):
+              conf["plugins"]["updater"]["endpoints"] = [
+                  "https://github.com/safzanpirani/Handy/releases/latest/download/latest.json"
+              ]
+          with open(path, "w") as f:
+              json.dump(conf, f, indent=2)
+          EOF
+          echo "unsigned build: updater artifacts disabled"
+
+      - name: Build with Tauri (signed)
+        if: inputs.sign-binaries
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -538,6 +565,23 @@ jobs:
           AZURE_TENANT_ID: ${{ inputs.sign-binaries && secrets.AZURE_TENANT_ID || '' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign-binaries && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign-binaries && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        with:
+          tagName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
+          releaseName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
+          releaseId: ${{ inputs.release-id }}
+          assetNamePattern: ${{ steps.patch-release-name.outputs.platform }}
+          args: ${{ inputs.build-args }}
+
+      # Deliberately no APPLE_*/AZURE_*/TAURI_SIGNING_* here. Setting them to ''
+      # does not unset them -- GitHub still exports the key, and Tauri's bundler
+      # branches on the variable being present, so an empty APPLE_CERTIFICATE
+      # sends it into `security import` with an empty file and the whole bundle
+      # fails after a ten-minute compile.
+      - name: Build with Tauri (unsigned)
+        if: ${{ !inputs.sign-binaries }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
           releaseName: ${{ inputs.release-id && format('v{0}', steps.get-version.outputs.version) || '' }}
