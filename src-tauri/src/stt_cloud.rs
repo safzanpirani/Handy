@@ -430,9 +430,14 @@ fn build_ws_url(req: &CloudSttRequest) -> Result<String> {
 
 const DEEPGRAM_FLUX_WS_URL: &str = "wss://api.deepgram.com/v2/listen";
 
-/// Flux's query string. Deliberately not the `/v1` one: Flux always punctuates
-/// and formats, has no `interim_results` (it streams cumulative turns instead),
-/// and takes end-of-turn thresholds in place of `endpointing`.
+/// Flux's query string. Deliberately not the `/v1` one: Flux punctuates on its
+/// own, has no `interim_results` (it streams cumulative turns instead), and
+/// takes end-of-turn thresholds in place of `endpointing`.
+///
+/// It does *not* format numbers on its own. `/v1`'s `smart_format=true` implied
+/// numerals; Flux splits that out into `numerals`, which defaults to **false**.
+/// Dropping `smart_format` without adding this is what turns "July 2024" back
+/// into "July twenty twenty four".
 ///
 /// Handy is push-to-talk, so the *user's key release* is the real end of the
 /// utterance — not Deepgram's guess at one. Both thresholds are therefore
@@ -445,8 +450,13 @@ fn build_flux_ws_url(req: &CloudSttRequest, model: &str) -> Result<String> {
         q.append_pair("model", model);
         q.append_pair("encoding", "linear16");
         q.append_pair("sample_rate", &SAMPLE_RATE.to_string());
+        // Deepgram's defaults here are 0.7 and 5000; both are pushed to their
+        // maximums on purpose (see above).
         q.append_pair("eot_threshold", "0.9");
         q.append_pair("eot_timeout_ms", "60000");
+        // Spoken dates, times, quantities and money as digits. Defaults to
+        // false on Flux, unlike `/v1` where `smart_format` covered it.
+        q.append_pair("numerals", "true");
 
         // The multilingual variant takes hints; the English one takes no
         // language parameter at all and 400s if given one.
@@ -859,6 +869,16 @@ mod tests {
         // Flux falls back to nova-3 off the socket, which also takes keyterms --
         // so the fallback must not silently re-enable the fuzzy pass.
         assert!(model_accepts_keyterms(batch_model("flux-general-multi")));
+    }
+
+    #[test]
+    fn flux_asks_for_numerals() {
+        // Flux defaults numerals to false, and it has no `smart_format` to imply
+        // it -- without this, "twenty twenty four" never becomes "2024".
+        let url = build_ws_url(&flux_req()).unwrap();
+        assert!(url.contains("numerals=true"), "url was {url}");
+        // Still no /v1-only formatting params, which Flux rejects.
+        assert!(!url.contains("smart_format"));
     }
 
     #[test]
