@@ -1,0 +1,39 @@
+name: "Fork Build"
+
+# Fork-only convenience build: unsigned installers for this fork's branches so
+# they can be handed to someone without a build toolchain (and so a machine
+# short on disk doesn't have to build Tauri locally).
+# Signing is off because the code-signing secrets live in the upstream repo.
+
+on:
+  push:
+    branches: [feat/deepgram-cloud-stt, feat/deepgram-flux]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+            target: "aarch64-apple-darwin"
+          - platform: "windows-latest"
+            target: "x86_64-pc-windows-msvc"
+    # Must match the reusable workflow's own `contents: write` — a called
+    # workflow cannot be granted more than its caller holds, and anything less
+    # fails the run at startup.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      platform: ${{ matrix.platform }}
+      target: ${{ matrix.target }}
+      build-args: ""
+      upload-artifacts: true
+      sign-binaries: false
+    secrets: inherit
