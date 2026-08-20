@@ -17,6 +17,17 @@ use std::time::Duration;
 
 pub const DEEPGRAM_PROVIDER_ID: &str = "deepgram";
 pub const DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
+/// Whether the model takes decode-time keyterm bias.
+///
+/// Callers use this to decide whether the local fuzzy custom-word pass still
+/// needs to run: when Deepgram has already been told the terms, re-correcting
+/// its output only risks rewriting words it got right.
+pub fn model_accepts_keyterms(model: &str) -> bool {
+    // keyterm is a nova-3 feature on /v1; older models 400 on it. Flux takes it
+    // on /v2 regardless of variant.
+    is_flux_model(model) || model.starts_with("nova-3")
+}
+
 /// Deepgram's conversational turn-based model. Streaming-only, and a different
 /// wire protocol from the `/v1/listen` models — see [`build_flux_ws_url`].
 ///
@@ -41,7 +52,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Deepgram caps keyterm prompting; stay well under it rather than 400ing.
 const MAX_KEYTERMS: usize = 100;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudSttRequest {
     pub api_key: String,
     /// Deepgram model id, e.g. `nova-3`.
@@ -98,7 +109,7 @@ fn deepgram_language(language: &str) -> String {
 /// The model to use on the batch endpoint. Flux is streaming-only, so a Flux
 /// selection falls back to the default batch model rather than 400ing — the
 /// batch path exists precisely as the safety net when the socket fails.
-fn batch_model(model: &str) -> &str {
+pub fn batch_model(model: &str) -> &str {
     if is_flux_model(model) {
         warn!(
             "{} is streaming-only; falling back to {} for the batch request",
@@ -128,8 +139,7 @@ fn build_url(req: &CloudSttRequest) -> Result<String> {
         q.append_pair("smart_format", "true");
         q.append_pair("punctuate", "true");
 
-        // keyterm is a nova-3 feature; older models 400 on it.
-        if model.starts_with("nova-3") {
+        if model_accepts_keyterms(model) {
             for term in req
                 .keyterms
                 .iter()
@@ -261,6 +271,18 @@ pub struct DeepgramLiveStream {
 }
 
 impl DeepgramLiveStream {
+    /// Whether the socket task is still running.
+    ///
+    /// The task owns the command receiver, so the sender closing means the task
+    /// exited -- Deepgram dropped an idle connection, or the session errored.
+    /// A pre-warmed stream must be checked with this before use: reusing a dead
+    /// socket would fail the dictation into the slow batch fallback, which is
+    /// worse than simply paying for a fresh connect.
+    pub fn is_alive(&self) -> bool {
+        !self.cmd_tx.is_closed()
+    }
+
+
     /// Open the socket. Blocks until the handshake completes (or fails), so a
     /// returned stream is ready to accept audio.
     ///
@@ -391,7 +413,7 @@ fn build_ws_url(req: &CloudSttRequest) -> Result<String> {
         // until the user stops speaking.
         q.append_pair("interim_results", "true");
 
-        if model.starts_with("nova-3") {
+        if model_accepts_keyterms(model) {
             for term in req
                 .keyterms
                 .iter()
@@ -816,6 +838,27 @@ mod tests {
             model: "flux-general-en".to_string(),
             ..req()
         }
+    }
+
+    #[test]
+    fn only_keyterm_capable_models_suppress_the_fuzzy_pass() {
+        // Both Flux variants and nova-3 take the terms at decode time, so the
+        // caller skips the local Soundex correction for them.
+        assert!(model_accepts_keyterms("flux-general-multi"));
+        assert!(model_accepts_keyterms("flux-general-en"));
+        assert!(model_accepts_keyterms("nova-3"));
+        assert!(model_accepts_keyterms("nova-3-general"));
+        // nova-2 and friends 400 on keyterm, so they never get one -- the fuzzy
+        // pass is the only thing applying custom words there and must stay on.
+        assert!(!model_accepts_keyterms("nova-2"));
+        assert!(!model_accepts_keyterms("whisper-large"));
+    }
+
+    #[test]
+    fn flux_still_counts_as_prompted_after_the_batch_fallback() {
+        // Flux falls back to nova-3 off the socket, which also takes keyterms --
+        // so the fallback must not silently re-enable the fuzzy pass.
+        assert!(model_accepts_keyterms(batch_model("flux-general-multi")));
     }
 
     #[test]
