@@ -740,7 +740,11 @@ fn default_cloud_stt_models() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for id in cloud_stt_provider_ids() {
         let default_model = if id == crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
-            crate::stt_cloud::DEEPGRAM_DEFAULT_MODEL.to_string()
+            // Flux is the turn-based streaming model: it transcribes as you speak and
+            // finalizes on end-of-turn, which is dramatically faster for push-to-talk
+            // than nova-3's interim/final stream. Defaults to the multilingual
+            // variant; `nova-3` remains available for the batch path.
+            crate::stt_cloud::DEEPGRAM_FLUX_MODEL.to_string()
         } else {
             String::new()
         };

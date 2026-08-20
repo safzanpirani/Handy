@@ -10,6 +10,18 @@ import { ToggleSwitch } from "../ui/ToggleSwitch";
 const DEEPGRAM = "deepgram";
 
 /**
+ * Deepgram models worth one click. Flux (`/v2/listen`) is turn-based: it
+ * transcribes as you speak and finalizes on end-of-turn, which is markedly
+ * faster for push-to-talk than nova-3's interim/final stream. It is
+ * streaming-only, so the batch fallback transparently uses nova-3.
+ */
+const MODEL_PRESETS: ReadonlyArray<{ id: string; hint: string }> = [
+  { id: "flux-general-multi", hint: "Fastest · 10 languages, auto-detected" },
+  { id: "flux-general-en", hint: "Fastest · English only" },
+  { id: "nova-3", hint: "Batch-capable · widest language support" },
+];
+
+/**
  * Cloud speech-to-text. When enabled, audio is sent to a hosted STT API
  * instead of the local engine — no model download, but every dictation needs
  * network. Custom words are forwarded as decode-time bias where supported.
@@ -70,16 +82,42 @@ export const CloudTranscription: React.FC = React.memo(() => {
             layout="horizontal"
             grouped={true}
           >
-            <Input
-              type="text"
-              value={modelDraft}
-              onChange={(event) => setModelDraft(event.target.value)}
-              onBlur={() => setModel(modelDraft)}
-              placeholder="nova-3"
-              variant="compact"
-              disabled={isUpdating("cloud_stt_models")}
-              className="min-w-[200px]"
-            />
+            <div className="flex flex-col items-end gap-1.5">
+              <Input
+                type="text"
+                value={modelDraft}
+                onChange={(event) => setModelDraft(event.target.value)}
+                onBlur={() => setModel(modelDraft)}
+                placeholder="flux-general-multi"
+                variant="compact"
+                disabled={isUpdating("cloud_stt_models")}
+                className="min-w-[200px]"
+              />
+              <div className="flex flex-wrap justify-end gap-1">
+                {MODEL_PRESETS.map((preset) => {
+                  const active = storedModel === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      title={preset.hint}
+                      disabled={isUpdating("cloud_stt_models")}
+                      onClick={() => {
+                        setModelDraft(preset.id);
+                        setModel(preset.id);
+                      }}
+                      className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors disabled:opacity-50 ${
+                        active
+                          ? "border-transparent bg-mid-gray/30 text-text font-medium"
+                          : "border-mid-gray/40 text-text/60 hover:bg-mid-gray/15 hover:text-text"
+                      }`}
+                    >
+                      {preset.id}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </SettingContainer>
         </>
       )}

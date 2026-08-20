@@ -17,6 +17,22 @@ use std::time::Duration;
 
 pub const DEEPGRAM_PROVIDER_ID: &str = "deepgram";
 pub const DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
+/// Deepgram's conversational turn-based model. Streaming-only, and a different
+/// wire protocol from the `/v1/listen` models — see [`build_flux_ws_url`].
+///
+/// The multilingual variant is the default because Handy's own language setting
+/// defaults to "auto": `flux-general-multi` covers 10 languages (English among
+/// them) and auto-detects, whereas `flux-general-en` would silently force
+/// English on everyone. Users who only ever dictate English can switch to
+/// `flux-general-en` for a marginal accuracy gain.
+pub const DEEPGRAM_FLUX_MODEL: &str = "flux-general-multi";
+
+/// Flux speaks `/v2/listen` with `TurnInfo` frames; everything else speaks
+/// `/v1/listen` with `Results` frames. The model id is the only discriminator
+/// Deepgram gives us.
+fn is_flux_model(model: &str) -> bool {
+    model.trim().starts_with("flux")
+}
 
 const DEEPGRAM_URL: &str = "https://api.deepgram.com/v1/listen";
 /// Handy hands us mono f32 at the whisper rate; Deepgram is told the same.
@@ -79,12 +95,27 @@ fn deepgram_language(language: &str) -> String {
     }
 }
 
+/// The model to use on the batch endpoint. Flux is streaming-only, so a Flux
+/// selection falls back to the default batch model rather than 400ing — the
+/// batch path exists precisely as the safety net when the socket fails.
+fn batch_model(model: &str) -> &str {
+    if is_flux_model(model) {
+        warn!(
+            "{} is streaming-only; falling back to {} for the batch request",
+            model, DEEPGRAM_DEFAULT_MODEL
+        );
+        DEEPGRAM_DEFAULT_MODEL
+    } else {
+        model
+    }
+}
+
 fn build_url(req: &CloudSttRequest) -> Result<String> {
-    let model = if req.model.trim().is_empty() {
+    let model = batch_model(if req.model.trim().is_empty() {
         DEEPGRAM_DEFAULT_MODEL
     } else {
         req.model.trim()
-    };
+    });
 
     let mut url = reqwest::Url::parse(DEEPGRAM_URL)?;
     {
@@ -247,6 +278,11 @@ impl DeepgramLiveStream {
         }
 
         let url = build_ws_url(req)?;
+        let flux = is_flux_model(if req.model.trim().is_empty() {
+            DEEPGRAM_DEFAULT_MODEL
+        } else {
+            req.model.trim()
+        });
         let api_key = req.api_key.clone();
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WsCmd>();
         // Two hops: `ready` reports handshake success so `connect` can block,
@@ -270,6 +306,7 @@ impl DeepgramLiveStream {
                 rt.block_on(run_ws_session(
                     url,
                     api_key,
+                    flux,
                     cmd_rx,
                     ready_tx,
                     result_tx,
@@ -336,6 +373,10 @@ fn build_ws_url(req: &CloudSttRequest) -> Result<String> {
         req.model.trim()
     };
 
+    if is_flux_model(model) {
+        return build_flux_ws_url(req, model);
+    }
+
     let mut url = reqwest::Url::parse(DEEPGRAM_WS_URL)?;
     {
         let mut q = url.query_pairs_mut();
@@ -363,6 +404,123 @@ fn build_ws_url(req: &CloudSttRequest) -> Result<String> {
         }
     }
     Ok(url.to_string())
+}
+
+const DEEPGRAM_FLUX_WS_URL: &str = "wss://api.deepgram.com/v2/listen";
+
+/// Flux's query string. Deliberately not the `/v1` one: Flux always punctuates
+/// and formats, has no `interim_results` (it streams cumulative turns instead),
+/// and takes end-of-turn thresholds in place of `endpointing`.
+///
+/// Handy is push-to-talk, so the *user's key release* is the real end of the
+/// utterance — not Deepgram's guess at one. Both thresholds are therefore
+/// pushed to their maximums so Flux won't guillotine a turn just because the
+/// speaker paused to think. We end the turn ourselves on `CloseStream`.
+fn build_flux_ws_url(req: &CloudSttRequest, model: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(DEEPGRAM_FLUX_WS_URL)?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("model", model);
+        q.append_pair("encoding", "linear16");
+        q.append_pair("sample_rate", &SAMPLE_RATE.to_string());
+        q.append_pair("eot_threshold", "0.9");
+        q.append_pair("eot_timeout_ms", "60000");
+
+        // The multilingual variant takes hints; the English one takes no
+        // language parameter at all and 400s if given one.
+        if model.contains("multi") {
+            let lang = deepgram_language(&req.language);
+            if lang != "multi" {
+                q.append_pair("language_hint", &lang);
+            }
+        }
+
+        for term in req
+            .keyterms
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .take(MAX_KEYTERMS)
+        {
+            q.append_pair("keyterm", term);
+        }
+    }
+    Ok(url.to_string())
+}
+
+/// One `TurnInfo` frame from Flux.
+#[derive(Debug, Deserialize)]
+struct FluxLiveMessage {
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
+    /// `StartOfTurn` | `Update` | `EagerEndOfTurn` | `TurnResumed` | `EndOfTurn`
+    event: Option<String>,
+    turn_index: Option<u32>,
+    transcript: Option<String>,
+    /// Present on `type: "Error"` frames.
+    code: Option<String>,
+    description: Option<String>,
+}
+
+/// Accumulates Flux turns into a transcript.
+///
+/// Unlike `/v1`, a Flux transcript is *cumulative within a turn* and resets
+/// when that turn ends — so the newest text for a given `turn_index` always
+/// supersedes the previous one, and turns only ever accumulate forwards. That
+/// maps cleanly onto the overlay's (committed, tentative) contract: every
+/// closed turn is committed, and the still-open turn is the volatile tail.
+#[derive(Default)]
+struct FluxTranscript {
+    turns: std::collections::BTreeMap<u32, String>,
+    open: Option<u32>,
+}
+
+impl FluxTranscript {
+    /// Returns true if anything changed and the caller should emit an update.
+    fn apply(&mut self, index: u32, transcript: &str, end_of_turn: bool) -> bool {
+        let text = transcript.trim();
+        let mut changed = false;
+
+        // An empty frame (a bare StartOfTurn, or silence closing a turn) must
+        // never erase text we already hold for that turn.
+        if !text.is_empty() && self.turns.get(&index).map(String::as_str) != Some(text) {
+            self.turns.insert(index, text.to_string());
+            changed = true;
+        }
+
+        let open = if end_of_turn { None } else { Some(index) };
+        if self.open != open {
+            self.open = open;
+            changed = true;
+        }
+        changed
+    }
+
+    fn committed(&self) -> String {
+        self.turns
+            .iter()
+            .filter(|(i, _)| Some(**i) != self.open)
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn tentative(&self) -> String {
+        self.open
+            .and_then(|i| self.turns.get(&i))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn display(&self) -> String {
+        self.turns
+            .values()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim()
+            .to_string()
+    }
 }
 
 /// One `Results` frame from the live API.
@@ -430,6 +588,8 @@ impl LiveTranscript {
 async fn run_ws_session(
     url: String,
     api_key: String,
+    // True for `/v2/listen` (Flux `TurnInfo` frames), false for `/v1/listen`.
+    flux: bool,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<WsCmd>,
     ready_tx: std::sync::mpsc::Sender<Result<()>>,
     result_tx: std::sync::mpsc::Sender<Result<String>>,
@@ -468,8 +628,12 @@ async fn run_ws_session(
     debug!("Deepgram live stream connected");
 
     let mut transcript = LiveTranscript::default();
+    let mut flux_transcript = FluxTranscript::default();
     // Set once `CloseStream` is sent: from then on we only drain replies.
     let mut closing = false;
+    // Flux only: audio has been streamed that no `EndOfTurn` has covered yet, so
+    // there is still a tail for the server to transcribe.
+    let mut pending_audio = false;
     let mut outcome: Option<Result<String>> = None;
 
     loop {
@@ -480,6 +644,46 @@ async fn run_ws_session(
 
             incoming = socket.next() => {
                 match incoming {
+                    Some(Ok(Message::Text(payload))) if flux => {
+                        match serde_json::from_str::<FluxLiveMessage>(&payload) {
+                            Ok(msg) => {
+                                match msg.msg_type.as_deref() {
+                                    Some("Error") => {
+                                        outcome = Some(Err(anyhow!(
+                                            "Deepgram Flux error: {}",
+                                            msg.description
+                                                .or(msg.code)
+                                                .unwrap_or_else(|| payload.to_string())
+                                        )));
+                                        break;
+                                    }
+                                    Some("TurnInfo") => {
+                                        let index = msg.turn_index.unwrap_or(0);
+                                        let ended = msg.event.as_deref() == Some("EndOfTurn");
+                                        if ended {
+                                            pending_audio = false;
+                                        }
+                                        let text = msg.transcript.unwrap_or_default();
+                                        if flux_transcript.apply(index, &text, ended) {
+                                            on_interim(
+                                                &flux_transcript.committed(),
+                                                &flux_transcript.tentative(),
+                                            );
+                                        }
+                                        // The EndOfTurn that arrives after CloseStream covers
+                                        // our trailing audio — that, not a timer, is when the
+                                        // transcript is actually complete.
+                                        if closing && ended {
+                                            break;
+                                        }
+                                    }
+                                    // Connected / ConfigureSuccess / keepalives.
+                                    _ => {}
+                                }
+                            }
+                            Err(e) => warn!("Unparseable Deepgram Flux frame: {} ({})", e, payload),
+                        }
+                    }
                     Some(Ok(Message::Text(payload))) => {
                         match serde_json::from_str::<DeepgramLiveMessage>(&payload) {
                             Ok(msg) => {
@@ -520,6 +724,7 @@ async fn run_ws_session(
             cmd = cmd_rx.recv(), if !closing => {
                 match cmd {
                     Some(WsCmd::Audio(bytes)) => {
+                        pending_audio = true;
                         if let Err(e) = socket.send(Message::Binary(bytes.into())).await {
                             outcome = Some(Err(anyhow!("Failed to send audio to Deepgram: {}", e)));
                             break;
@@ -530,6 +735,12 @@ async fn run_ws_session(
                         let close_frame = r#"{"type":"CloseStream"}"#.to_string();
                         if let Err(e) = socket.send(Message::Text(close_frame.into())).await {
                             outcome = Some(Err(anyhow!("Failed to close Deepgram stream: {}", e)));
+                            break;
+                        }
+                        // Flux: if every byte we sent is already covered by an EndOfTurn,
+                        // the transcript is complete and no further frame is coming — don't
+                        // sit here until the finalize timeout waiting for one.
+                        if flux && !pending_audio {
                             break;
                         }
                     }
@@ -543,7 +754,12 @@ async fn run_ws_session(
     let _ = socket.close(None).await;
     // An empty transcript is a legitimate result (silence), not an error —
     // same contract as the batch path.
-    let _ = result_tx.send(outcome.unwrap_or_else(|| Ok(transcript.display())));
+    let final_text = if flux {
+        flux_transcript.display()
+    } else {
+        transcript.display()
+    };
+    let _ = result_tx.send(outcome.unwrap_or_else(|| Ok(final_text)));
 }
 
 fn parse_transcript(body: &str) -> Result<String> {
@@ -591,6 +807,168 @@ mod tests {
         let bytes = to_linear16(&[2.0, -2.0]);
         assert_eq!(&bytes[0..2], &i16::MAX.to_le_bytes());
         assert_eq!(&bytes[2..4], &(-i16::MAX).to_le_bytes());
+    }
+
+    /// Pinned to the English variant on purpose: these assertions are about the
+    /// `/v2` wire format, not about which model happens to be the default.
+    fn flux_req() -> CloudSttRequest {
+        CloudSttRequest {
+            model: "flux-general-en".to_string(),
+            ..req()
+        }
+    }
+
+    #[test]
+    fn the_default_flux_model_is_multilingual() {
+        // Handy's language setting defaults to "auto", so the default Flux model
+        // must not silently force English.
+        assert!(is_flux_model(DEEPGRAM_FLUX_MODEL));
+        assert!(DEEPGRAM_FLUX_MODEL.contains("multi"));
+    }
+
+    #[test]
+    fn flux_models_are_detected_by_prefix() {
+        assert!(is_flux_model("flux-general-en"));
+        assert!(is_flux_model("flux-general-multi"));
+        assert!(is_flux_model("  flux-general-en  "));
+        assert!(!is_flux_model("nova-3"));
+        assert!(!is_flux_model("nova-3-flux"));
+    }
+
+    #[test]
+    fn flux_uses_the_v2_endpoint_and_turn_thresholds() {
+        let url = build_ws_url(&flux_req()).unwrap();
+        assert!(url.starts_with("wss://api.deepgram.com/v2/listen"));
+        assert!(url.contains("model=flux-general-en"));
+        assert!(url.contains("encoding=linear16"));
+        assert!(url.contains("sample_rate=16000"));
+        // Push-to-talk: we decide when the turn ends, not Deepgram.
+        assert!(url.contains("eot_threshold=0.9"));
+        assert!(url.contains("eot_timeout_ms=60000"));
+        // /v1-only parameters must not leak onto /v2.
+        assert!(!url.contains("interim_results"));
+        assert!(!url.contains("smart_format"));
+        assert!(!url.contains("punctuate"));
+        // flux-general-en takes no language parameter at all.
+        assert!(!url.contains("language"));
+    }
+
+    #[test]
+    fn nova_still_uses_the_v1_endpoint() {
+        let url = build_ws_url(&req()).unwrap();
+        assert!(url.starts_with("wss://api.deepgram.com/v1/listen"));
+        assert!(url.contains("interim_results=true"));
+    }
+
+    #[test]
+    fn flux_multi_passes_a_language_hint_but_not_for_auto() {
+        let hinted = build_ws_url(&CloudSttRequest {
+            model: "flux-general-multi".to_string(),
+            language: "fr".to_string(),
+            ..req()
+        })
+        .unwrap();
+        assert!(hinted.contains("language_hint=fr"));
+
+        // "auto" maps to Deepgram's "multi", which is the model's own default —
+        // sending it as a hint would pointlessly narrow nothing.
+        let auto = build_ws_url(&CloudSttRequest {
+            model: "flux-general-multi".to_string(),
+            ..req()
+        })
+        .unwrap();
+        assert!(!auto.contains("language_hint"));
+    }
+
+    #[test]
+    fn flux_forwards_keyterms() {
+        let url = build_ws_url(&CloudSttRequest {
+            keyterms: vec!["Handy".into(), "  ".into(), "Deepgram".into()],
+            ..flux_req()
+        })
+        .unwrap();
+        assert!(url.contains("keyterm=Handy"));
+        assert!(url.contains("keyterm=Deepgram"));
+        // blank entries are dropped rather than sent as empty pairs
+        assert_eq!(url.matches("keyterm=").count(), 2);
+    }
+
+    #[test]
+    fn batch_falls_back_off_flux() {
+        // Flux is streaming-only; the batch safety net must not 400.
+        assert_eq!(batch_model("flux-general-en"), DEEPGRAM_DEFAULT_MODEL);
+        assert_eq!(batch_model("nova-3"), "nova-3");
+        let url = build_url(&flux_req()).unwrap();
+        assert!(url.contains("model=nova-3"));
+    }
+
+    #[test]
+    fn flux_transcript_supersedes_within_a_turn() {
+        let mut t = FluxTranscript::default();
+        // Cumulative: the newest text for a turn replaces the older one.
+        assert!(t.apply(0, "hello", false));
+        assert!(t.apply(0, "hello there", false));
+        assert_eq!(t.tentative(), "hello there");
+        assert_eq!(t.committed(), "");
+        assert_eq!(t.display(), "hello there");
+        // Identical repeat is not a change.
+        assert!(!t.apply(0, "hello there", false));
+    }
+
+    #[test]
+    fn flux_transcript_commits_on_end_of_turn() {
+        let mut t = FluxTranscript::default();
+        t.apply(0, "first turn", false);
+        assert!(t.apply(0, "first turn", true));
+        assert_eq!(t.committed(), "first turn");
+        assert_eq!(t.tentative(), "");
+
+        t.apply(1, "second", false);
+        assert_eq!(t.committed(), "first turn");
+        assert_eq!(t.tentative(), "second");
+        assert_eq!(t.display(), "first turn second");
+    }
+
+    #[test]
+    fn flux_transcript_ignores_empty_frames() {
+        let mut t = FluxTranscript::default();
+        t.apply(0, "kept", false);
+        // A bare StartOfTurn / silence frame must not erase what we hold.
+        t.apply(0, "", false);
+        assert_eq!(t.display(), "kept");
+        t.apply(0, "   ", true);
+        assert_eq!(t.committed(), "kept");
+    }
+
+    #[test]
+    fn flux_turns_are_ordered_by_index_not_arrival() {
+        let mut t = FluxTranscript::default();
+        t.apply(2, "third", true);
+        t.apply(0, "first", true);
+        t.apply(1, "second", true);
+        assert_eq!(t.display(), "first second third");
+    }
+
+    #[test]
+    fn flux_error_frame_parses() {
+        let msg: FluxLiveMessage = serde_json::from_str(
+            r#"{"type":"Error","code":"INVALID_AUTH","description":"bad key"}"#,
+        )
+        .unwrap();
+        assert_eq!(msg.msg_type.as_deref(), Some("Error"));
+        assert_eq!(msg.description.as_deref(), Some("bad key"));
+    }
+
+    #[test]
+    fn flux_turninfo_frame_parses() {
+        let msg: FluxLiveMessage = serde_json::from_str(
+            r#"{"type":"TurnInfo","event":"EndOfTurn","turn_index":3,
+                "transcript":"all done","end_of_turn_confidence":0.94,"words":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(msg.event.as_deref(), Some("EndOfTurn"));
+        assert_eq!(msg.turn_index, Some(3));
+        assert_eq!(msg.transcript.as_deref(), Some("all done"));
     }
 
     #[test]
