@@ -716,6 +716,11 @@ impl ShortcutAction for TranscribeAction {
                         Err(err) => Err(err),
                     };
 
+                    // Re-open a socket for the next dictation now, while the user
+                    // is reading what they just dictated, rather than making them
+                    // wait through the handshake next time.
+                    tm.prewarm_cloud_stream();
+
                     // Await WAV save and verify
                     let wav_saved = match wav_handle.await {
                         Ok(Ok(())) => {

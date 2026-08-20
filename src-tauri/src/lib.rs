@@ -169,6 +169,10 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     let history_manager =
         Arc::new(HistoryManager::new(app_handle).expect("Failed to initialize history manager"));
 
+    // Open the cloud socket now so the *first* dictation is as fast as the rest.
+    // Non-blocking and best-effort; no-ops unless cloud STT is configured.
+    transcription_manager.prewarm_cloud_stream();
+
     // Initialize the transcribe-cpp native backend (logging + backend module
     // registration) once, before any whisper model is loaded.
     managers::transcription::init_transcribe_backend();

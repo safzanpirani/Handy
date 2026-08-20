@@ -267,7 +267,26 @@ pub struct TranscriptionManager {
     /// `is_model_loaded()` consults this so the model still reports "loaded"
     /// while the worker holds it.
     active_engine_lease: Arc<AtomicU64>,
+    /// A cloud socket opened ahead of record-start so its handshake is off the
+    /// critical path. See [`TranscriptionManager::prewarm_cloud_stream`].
+    prewarmed_cloud: Arc<Mutex<Option<PrewarmedCloudStream>>>,
 }
+
+/// A cloud streaming socket connected before the user started talking.
+struct PrewarmedCloudStream {
+    stream: crate::stt_cloud::DeepgramLiveStream,
+    /// The request it was opened with. A pre-warm is only reusable for an
+    /// identical request -- a changed model, key or keyterm set means the URL
+    /// baked into the open socket is wrong.
+    req: crate::stt_cloud::CloudSttRequest,
+    created: Instant,
+}
+
+/// How long a pre-warmed socket may sit idle before we stop trusting it.
+///
+/// Liveness is checked separately and is the real guard; this only bounds how
+/// long we hold a connection open to Deepgram with nothing to say.
+const PREWARM_TTL: Duration = Duration::from_secs(90);
 
 impl TranscriptionManager {
     pub fn new(app_handle: &AppHandle, model_manager: Arc<ModelManager>) -> Result<Self> {
@@ -287,6 +306,7 @@ impl TranscriptionManager {
             next_stream_worker_id: Arc::new(AtomicU64::new(1)),
             active_stream_worker: Arc::new(AtomicU64::new(0)),
             active_engine_lease: Arc::new(AtomicU64::new(0)),
+            prewarmed_cloud: Arc::new(Mutex::new(None)),
         };
 
         // Start the idle watcher
@@ -837,11 +857,17 @@ impl TranscriptionManager {
         };
 
         let connect_start = Instant::now();
+        // A socket opened before the user started talking skips the handshake
+        // entirely; falling through to `connect` costs exactly what it always did.
+        let prewarmed = self.take_prewarmed_cloud_stream(&req);
+        let was_prewarmed = prewarmed.is_some();
         let manager = self.clone();
-        let stream = match crate::stt_cloud::DeepgramLiveStream::connect(
-            &req,
-            move |committed, tentative| manager.emit_stream_text(committed, tentative),
-        ) {
+        let stream = match prewarmed.map(Ok).unwrap_or_else(|| {
+            crate::stt_cloud::DeepgramLiveStream::connect(
+                &req,
+                move |committed, tentative| manager.emit_stream_text(committed, tentative),
+            )
+        }) {
             Ok(stream) => stream,
             Err(e) => {
                 warn!(
@@ -854,8 +880,13 @@ impl TranscriptionManager {
             }
         };
         info!(
-            "Cloud streaming transcription started (model '{}', connected in {:?})",
+            "Cloud streaming transcription started (model '{}', {} in {:?})",
             req.model,
+            if was_prewarmed {
+                "pre-warmed socket claimed"
+            } else {
+                "connected"
+            },
             connect_start.elapsed()
         );
         self.stream_active.store(true, Ordering::Release);
@@ -1178,9 +1209,14 @@ impl TranscriptionManager {
         };
 
         let settings = get_settings(&self.app_handle);
-        // Streaming models do not receive a decode prompt, so custom words
-        // always go through the shared fuzzy post-correction path.
-        let filtered = post_process_transcription_text(raw, &settings, false);
+        // Deepgram's streaming models *do* take a decode prompt (keyterms), so
+        // where they got one the fuzzy post-correction is skipped -- see
+        // `transcribe_cloud` for why running both is actively harmful.
+        let prompted = self
+            .cloud_request(&settings)
+            .map(|req| crate::stt_cloud::model_accepts_keyterms(&req.model))
+            .unwrap_or(false);
+        let filtered = post_process_transcription_text(raw, &settings, prompted);
 
         self.maybe_unload_immediately("streaming transcription");
         Ok(Some(filtered))
@@ -1203,6 +1239,108 @@ impl TranscriptionManager {
         .emit(&self.app_handle);
     }
 
+    /// Open a cloud socket now so the next recording can start streaming
+    /// immediately.
+    ///
+    /// Measured on this machine, `connect` takes 1.3-6s (p50 1.7s) -- DNS, TCP,
+    /// TLS and the WebSocket upgrade, all to a US endpoint. Paid at record-start
+    /// that is dead time before Deepgram hears a single sample, and it is the
+    /// bulk of the delay before the first interim result appears. Deepgram bills
+    /// by audio processed rather than connection time, so holding an idle socket
+    /// costs nothing but the connection itself.
+    ///
+    /// Cheap to call speculatively: it no-ops unless cloud streaming is actually
+    /// configured, and never replaces an existing pre-warm.
+    pub fn prewarm_cloud_stream(&self) {
+        let settings = get_settings(&self.app_handle);
+        if !settings.cloud_stt_enabled {
+            return;
+        }
+        let Ok(req) = self.cloud_request(&settings) else {
+            return;
+        };
+        // Don't race a live dictation for the socket, and don't stack pre-warms.
+        if self.active_stream_worker.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        {
+            let mut guard = self.prewarmed_cloud.lock().unwrap();
+            match guard.as_ref() {
+                // Already warm for exactly this request and still connected.
+                Some(p) if p.req == req && p.created.elapsed() <= PREWARM_TTL && p.stream.is_alive() => {
+                    return
+                }
+                // Stale: settings changed, it aged out, or Deepgram hung up.
+                // Drop it here rather than leaving it to block every future
+                // pre-warm until the next dictation clears it.
+                Some(_) => {
+                    *guard = None;
+                }
+                None => {}
+            }
+        }
+
+        let manager = self.clone();
+        // Off-thread: connecting blocks for over a second and callers are UI paths.
+        thread::spawn(move || {
+            let started = Instant::now();
+            let cb_manager = manager.clone();
+            match crate::stt_cloud::DeepgramLiveStream::connect(&req, move |c, t| {
+                cb_manager.emit_stream_text(c, t)
+            }) {
+                Ok(stream) => {
+                    let mut guard = manager.prewarmed_cloud.lock().unwrap();
+                    // A dictation may have started (and taken its own socket)
+                    // while we were connecting; don't leave a second one open.
+                    if guard.is_none() && manager.active_stream_worker.load(Ordering::Acquire) == 0
+                    {
+                        info!("Pre-warmed cloud socket ready in {:?}", started.elapsed());
+                        *guard = Some(PrewarmedCloudStream {
+                            stream,
+                            req,
+                            created: Instant::now(),
+                        });
+                    }
+                }
+                // Pre-warming is best-effort: the record-start path will connect
+                // normally and report any real failure there.
+                Err(e) => info!("Cloud pre-warm failed (will connect on demand): {}", e),
+            }
+        });
+    }
+
+    /// Discard any pre-warmed socket, e.g. because settings changed.
+    pub fn drop_prewarmed_cloud_stream(&self) {
+        if self.prewarmed_cloud.lock().unwrap().take().is_some() {
+            debug!("Dropped pre-warmed cloud socket");
+        }
+    }
+
+    /// Take the pre-warmed socket if it is usable for `req`.
+    ///
+    /// Returns `None` unless it was opened for an identical request, is still
+    /// within [`PREWARM_TTL`], and is still connected -- so a socket Deepgram
+    /// closed underneath us costs a normal connect, never a failed dictation.
+    fn take_prewarmed_cloud_stream(
+        &self,
+        req: &crate::stt_cloud::CloudSttRequest,
+    ) -> Option<crate::stt_cloud::DeepgramLiveStream> {
+        let prewarmed = self.prewarmed_cloud.lock().unwrap().take()?;
+        if &prewarmed.req != req {
+            debug!("Pre-warmed socket is for a different request; connecting fresh");
+            return None;
+        }
+        if prewarmed.created.elapsed() > PREWARM_TTL {
+            debug!("Pre-warmed socket expired; connecting fresh");
+            return None;
+        }
+        if !prewarmed.stream.is_alive() {
+            debug!("Pre-warmed socket was closed; connecting fresh");
+            return None;
+        }
+        Some(prewarmed.stream)
+    }
+
     fn emit_stream_text(&self, committed: &str, tentative: &str) {
         let _ = StreamTextEvent {
             committed: committed.to_string(),
@@ -1213,13 +1351,20 @@ impl TranscriptionManager {
 
     /// Transcribe via the configured cloud STT provider.
     ///
-    /// Custom words are sent as decode-time bias where the provider supports
-    /// it, but the local fuzzy-correction pass still runs afterwards — hence
-    /// `custom_words_already_prompted: false`.
+    /// Custom words are sent as decode-time bias where the provider supports it,
+    /// and where they were, the local fuzzy pass is skipped: Deepgram has already
+    /// been told the terms, so re-correcting its output only risks rewriting
+    /// words it got right. The fuzzy matcher is phonetic (Soundex), so an
+    /// ordinary word that merely sounds like a custom one gets overwritten --
+    /// "cloud" becoming "claude" when "claude" is in the list.
     fn transcribe_cloud(&self, audio: &[f32], settings: &AppSettings) -> Result<String> {
         let req = self.cloud_request(settings)?;
+        // The batch path may substitute a different model (Flux is streaming-only),
+        // so ask about the model actually used, not the configured one.
+        let prompted =
+            crate::stt_cloud::model_accepts_keyterms(crate::stt_cloud::batch_model(&req.model));
         let raw = crate::stt_cloud::transcribe_deepgram_blocking(&req, audio)?;
-        Ok(post_process_transcription_text(raw, settings, false))
+        Ok(post_process_transcription_text(raw, settings, prompted))
     }
 
     /// Build the provider request shared by the streaming and batch cloud paths.
