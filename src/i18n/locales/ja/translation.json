@@ -467,10 +467,6 @@
         "label": "サウンドテーマ",
         "description": "録音開始・停止フィードバックのサウンドテーマを選択"
       },
-      "wordCorrectionThreshold": {
-        "title": "単語修正しきい値",
-        "description": "カスタム単語修正の感度"
-      },
       "historyLimit": {
         "title": "履歴上限",
         "description": "保持する履歴エントリーの最大数",

@@ -467,10 +467,6 @@
         "label": "声音主题",
         "description": "选择录制开始和停止反馈的声音主题"
       },
-      "wordCorrectionThreshold": {
-        "title": "词汇修正阈值",
-        "description": "自定义词汇修正的灵敏度"
-      },
       "historyLimit": {
         "title": "历史记录上限",
         "description": "保留的最大历史条目数",

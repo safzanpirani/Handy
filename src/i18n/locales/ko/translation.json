@@ -467,10 +467,6 @@
         "label": "사운드 테마",
         "description": "녹음 시작 및 정지 피드백을 위한 사운드 테마를 선택하세요"
       },
-      "wordCorrectionThreshold": {
-        "title": "단어 수정 임계값",
-        "description": "사용자 정의 단어 수정의 민감도"
-      },
       "historyLimit": {
         "title": "히스토리 제한",
         "description": "보관할 최대 히스토리 항목 수",

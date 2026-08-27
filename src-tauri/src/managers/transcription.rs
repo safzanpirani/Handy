@@ -1,4 +1,4 @@
-use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
+use crate::audio_toolkit::filter_transcription_output;
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::{EngineType, ModelManager};
 use crate::settings::{
@@ -1209,14 +1209,7 @@ impl TranscriptionManager {
         };
 
         let settings = get_settings(&self.app_handle);
-        // Deepgram's streaming models *do* take a decode prompt (keyterms), so
-        // where they got one the fuzzy post-correction is skipped -- see
-        // `transcribe_cloud` for why running both is actively harmful.
-        let prompted = self
-            .cloud_request(&settings)
-            .map(|req| crate::stt_cloud::model_accepts_keyterms(&req.model))
-            .unwrap_or(false);
-        let filtered = post_process_transcription_text(raw, &settings, prompted);
+        let filtered = post_process_transcription_text(raw, &settings);
 
         self.maybe_unload_immediately("streaming transcription");
         Ok(Some(filtered))
@@ -1359,12 +1352,8 @@ impl TranscriptionManager {
     /// "cloud" becoming "claude" when "claude" is in the list.
     fn transcribe_cloud(&self, audio: &[f32], settings: &AppSettings) -> Result<String> {
         let req = self.cloud_request(settings)?;
-        // The batch path may substitute a different model (Flux is streaming-only),
-        // so ask about the model actually used, not the configured one.
-        let prompted =
-            crate::stt_cloud::model_accepts_keyterms(crate::stt_cloud::batch_model(&req.model));
         let raw = crate::stt_cloud::transcribe_deepgram_blocking(&req, audio)?;
-        Ok(post_process_transcription_text(raw, settings, prompted))
+        Ok(post_process_transcription_text(raw, settings))
     }
 
     /// Build the provider request shared by the streaming and batch cloud paths.
@@ -1690,12 +1679,7 @@ impl TranscriptionManager {
             }
         };
 
-        // Apply fuzzy word correction if custom words are configured — UNLESS the
-        // words were already handed to the model as an initial prompt (whisper
-        // family). We don't pass a prompt to non-whisper models (it requires the
-        // whisper-kind run extension), so they still get fuzzy correction here,
-        // same as the ONNX engines.
-        let filtered_result = post_process_transcription_text(result, &settings, model_is_whisper);
+        let filtered_result = post_process_transcription_text(result, &settings);
 
         let et = std::time::Instant::now();
         let translation_note = if settings.translate_to_english {
@@ -1902,24 +1886,16 @@ fn transcribe_cpp_run_plan(
     }
 }
 
-fn post_process_transcription_text(
-    raw: String,
-    settings: &AppSettings,
-    custom_words_already_prompted: bool,
-) -> String {
+/// Custom words are applied at *decode* time only -- as Deepgram `keyterm`s and
+/// as whisper's `initial_prompt`. There is deliberately no post-hoc fuzzy
+/// correction pass: Soundex-plus-Levenshtein matching rewrites correct output
+/// far too eagerly (with "OneAI" in the dictionary, plain "one" scored 0.12
+/// against it and got replaced). A dictionary entry biases recognition; it never
+/// rewrites what came back.
+fn post_process_transcription_text(raw: String, settings: &AppSettings) -> String {
     fail_open_text_transform(raw, |raw| {
-        let corrected = if !settings.custom_words.is_empty() && !custom_words_already_prompted {
-            apply_custom_words(
-                &raw,
-                &settings.custom_words,
-                settings.word_correction_threshold,
-            )
-        } else {
-            raw
-        };
-
         filter_transcription_output(
-            &corrected,
+            &raw,
             &settings.app_language,
             &settings.custom_filler_words,
         )

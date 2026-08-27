@@ -474,10 +474,6 @@
         "label": "Geluidsthema",
         "description": "Kies een geluidsthema voor feedback bij het starten en stoppen van opnames"
       },
-      "wordCorrectionThreshold": {
-        "title": "Drempelwaarde woordcorrectie",
-        "description": "Gevoeligheid voor eigen woordcorrecties"
-      },
       "historyLimit": {
         "title": "Geschiedenislimiet",
         "description": "Maximum aantal te bewaren geschiedenisitems",

@@ -474,10 +474,6 @@
         "label": "Lydtema",
         "description": "Vælg et lydtema til feedback ved start og stop af optagelse"
       },
-      "wordCorrectionThreshold": {
-        "title": "Tærskel for ordkorrektion",
-        "description": "Følsomhed for brugerdefinerede ordkorrektioner"
-      },
       "historyLimit": {
         "title": "Historikgrænse",
         "description": "Maksimalt antal historikposter, der skal beholdes",

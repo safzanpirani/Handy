@@ -467,10 +467,6 @@
         "label": "Tema de sonido",
         "description": "Elige un tema de sonido para la retroalimentación de inicio y parada de grabación"
       },
-      "wordCorrectionThreshold": {
-        "title": "Umbral de corrección de palabras",
-        "description": "Sensibilidad para correcciones de palabras personalizadas"
-      },
       "historyLimit": {
         "title": "Límite de historial",
         "description": "Número máximo de entradas de historial a conservar",
