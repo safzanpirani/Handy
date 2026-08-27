@@ -358,8 +358,8 @@
       },
       "customWords": {
         "title": "Custom Words",
-        "description": "Help supported models recognize names and specialized terms. Fuzzy correction is currently limited to words using A–Z and numbers.",
-        "placeholder": "Add a word",
+        "description": "Names and specialized terms to bias recognition toward. Phrases are allowed. Applies to Deepgram and Whisper models.",
+        "placeholder": "Add a word or phrase",
         "add": "Add",
         "remove": "Remove {{word}}",
         "duplicate": "\"{{word}}\" already exists"

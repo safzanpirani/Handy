@@ -19,13 +19,14 @@ export const CustomWords: React.FC<CustomWordsProps> = React.memo(
     const customWords = getSetting("custom_words") || [];
 
     const handleAddWord = () => {
-      const trimmedWord = newWord.trim();
-      const sanitizedWord = trimmedWord.replace(/[<>"']/g, "");
-      if (
-        sanitizedWord &&
-        !sanitizedWord.includes(" ") &&
-        sanitizedWord.length <= 50
-      ) {
+      // Multi-word entries are allowed: Deepgram takes a phrase as a single
+      // keyterm, and whisper takes the whole list as one prompt. Internal runs
+      // of whitespace are collapsed so "Krea  2" and "Krea 2" are one entry.
+      const sanitizedWord = newWord
+        .replace(/[<>"']/g, "")
+        .trim()
+        .replace(/\s+/g, " ");
+      if (sanitizedWord && sanitizedWord.length <= 50) {
         if (customWords.includes(sanitizedWord)) {
           toast.error(
             t("settings.advanced.customWords.duplicate", {
@@ -64,7 +65,7 @@ export const CustomWords: React.FC<CustomWordsProps> = React.memo(
           <div className="flex items-center gap-2">
             <Input
               type="text"
-              className="max-w-40"
+              className="max-w-64"
               value={newWord}
               onChange={(e) => setNewWord(e.target.value)}
               onKeyDown={handleKeyPress}
@@ -76,8 +77,7 @@ export const CustomWords: React.FC<CustomWordsProps> = React.memo(
               onClick={handleAddWord}
               disabled={
                 !newWord.trim() ||
-                newWord.includes(" ") ||
-                newWord.trim().length > 50 ||
+                newWord.trim().replace(/\s+/g, " ").length > 50 ||
                 isUpdating("custom_words")
               }
               variant="primary"

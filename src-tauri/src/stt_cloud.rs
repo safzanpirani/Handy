@@ -957,6 +957,19 @@ mod tests {
     }
 
     #[test]
+    fn keyterms_may_be_multi_word_phrases() {
+        // The settings UI allows spaces, so a phrase must survive as ONE
+        // keyterm rather than being split or dropped.
+        let url = build_ws_url(&CloudSttRequest {
+            keyterms: vec!["Krea 2".into()],
+            ..flux_req()
+        })
+        .unwrap();
+        assert!(url.contains("keyterm=Krea+2") || url.contains("keyterm=Krea%202"));
+        assert_eq!(url.matches("keyterm=").count(), 1);
+    }
+
+    #[test]
     fn batch_falls_back_off_flux() {
         // Flux is streaming-only; the batch safety net must not 400.
         assert_eq!(batch_model("flux-general-en"), DEEPGRAM_DEFAULT_MODEL);
