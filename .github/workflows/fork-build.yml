@@ -37,3 +37,55 @@ jobs:
       upload-artifacts: true
       sign-binaries: false
     secrets: inherit
+
+  # Publishes the Windows installer to a rolling prerelease so it can be linked
+  # to directly, instead of living in an artifact that expires in 30 days and
+  # needs a GitHub login to download.
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/feat/deepgram-flux'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Collect installers
+        id: collect
+        run: |
+          mkdir -p release
+          # -print -quit keeps this failing loudly if the bundle layout moves,
+          # rather than publishing an empty release.
+          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \) \
+            -exec cp {} release/ \;
+          if [ -z "$(ls -A release)" ]; then
+            echo "No installers found in artifacts:" >&2
+            find artifacts -type f >&2
+            exit 1
+          fi
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          ls -la release
+
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="flux-latest"
+          # A rolling tag has to be moved, and `gh release edit` cannot retarget
+          # an existing tag, so the release is replaced wholesale each run.
+          gh release delete "$TAG" --yes --cleanup-tag || true
+          gh release create "$TAG" release/* \
+            --title "Flux build (rolling)" \
+            --notes "Automatic build of \`feat/deepgram-flux\` at ${GITHUB_SHA:0:7}.
+
+          Unsigned, so Windows SmartScreen will warn: **More info -> Run anyway**.
+
+          Rebuilt on every push to the branch; the download link stays the same." \
+            --prerelease \
+            --target "$GITHUB_SHA"
