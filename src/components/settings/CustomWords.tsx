@@ -11,31 +11,31 @@ interface CustomWordsProps {
   grouped?: boolean;
 }
 
+const normalizeCustomWord = (word: string) =>
+  word
+    .replace(/[<>"']/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
 export const CustomWords: React.FC<CustomWordsProps> = React.memo(
   ({ descriptionMode = "tooltip", grouped = false }) => {
     const { t } = useTranslation();
     const { getSetting, updateSetting, isUpdating } = useSettings();
     const [newWord, setNewWord] = useState("");
     const customWords = getSetting("custom_words") || [];
+    const normalizedWord = normalizeCustomWord(newWord);
 
     const handleAddWord = () => {
-      // Multi-word entries are allowed: Deepgram takes a phrase as a single
-      // keyterm, and whisper takes the whole list as one prompt. Internal runs
-      // of whitespace are collapsed so "Krea  2" and "Krea 2" are one entry.
-      const sanitizedWord = newWord
-        .replace(/[<>"']/g, "")
-        .trim()
-        .replace(/\s+/g, " ");
-      if (sanitizedWord && sanitizedWord.length <= 50) {
-        if (customWords.includes(sanitizedWord)) {
+      if (normalizedWord && normalizedWord.length <= 50) {
+        if (customWords.includes(normalizedWord)) {
           toast.error(
             t("settings.advanced.customWords.duplicate", {
-              word: sanitizedWord,
+              word: normalizedWord,
             }),
           );
           return;
         }
-        updateSetting("custom_words", [...customWords, sanitizedWord]);
+        updateSetting("custom_words", [...customWords, normalizedWord]);
         setNewWord("");
       }
     };
@@ -76,8 +76,8 @@ export const CustomWords: React.FC<CustomWordsProps> = React.memo(
             <Button
               onClick={handleAddWord}
               disabled={
-                !newWord.trim() ||
-                newWord.trim().replace(/\s+/g, " ").length > 50 ||
+                !normalizedWord ||
+                normalizedWord.length > 50 ||
                 isUpdating("custom_words")
               }
               variant="primary"

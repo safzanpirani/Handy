@@ -1,12 +1,13 @@
 {
   "tray": {
-    "settings": "...الإعدادات",
-    "checkUpdates": "...التحقق من وجود تحديثات",
+    "settings": "الإعدادات...",
+    "checkUpdates": "التحقق من وجود تحديثات...",
     "copyLastTranscript": "نسخ آخر نص تم تفريغه",
     "unloadModel": "تفريغ النموذج",
     "model": "النموذج",
     "quit": "إنهاء",
-    "cancel": "إلغاء"
+    "cancel": "إلغاء",
+    "secureInputWarning": "⚠ الاختصارات محجوبة بواسطة Secure Input"
   },
   "sidebar": {
     "general": "عام",
@@ -19,10 +20,10 @@
   },
   "onboarding": {
     "subtitle": "للبدء، اختر نموذج التفريغ الصوتي",
-    "existingModelsTitle": "Compatible Models",
-    "downloadModelsTitle": "Available to Download",
-    "showAllModels": "Show all {{total}} models",
-    "showFewerModels": "Show fewer models",
+    "existingModelsTitle": "النماذج المتوافقة",
+    "downloadModelsTitle": "متاح للتنزيل",
+    "showAllModels": "عرض كل النماذج ({{total}})",
+    "showFewerModels": "عرض عدد أقل من النماذج",
     "recommended": "موصى به",
     "customModelDescription": "غير مدعوم رسميًا",
     "modelCard": {
@@ -96,7 +97,7 @@
       }
     },
     "errors": {
-      "selectModel": "Failed to select model"
+      "selectModel": "فشل تحديد النموذج"
     },
     "permissions": {
       "title": "الأذونات المطلوبة",
@@ -111,7 +112,7 @@
       },
       "grant": "منح الإذن",
       "granted": "تم المنح",
-      "waiting": "...في الانتظار",
+      "waiting": "في الانتظار...",
       "allGranted": "كل شيء جاهز!",
       "errors": {
         "checkFailed": "فشل التحقق من الأذونات. يرجير المحاولة مرة أخرى.",
@@ -126,14 +127,14 @@
     "noModelsAvailable": "لا توجد نماذج متاحة",
     "verifying": "جارٍ التحقق من {{modelName}}...",
     "verifyingGeneric": "جارٍ التحقق...",
-    "extracting": "...جاري استخراج {{modelName}}",
-    "extractingMultiple": "...جاري استخراج {{count}} من النماذج",
-    "extractingGeneric": "...جاري الاستخراج",
+    "extracting": "جاري استخراج {{modelName}}...",
+    "extractingMultiple": "جاري استخراج {{count}} من النماذج...",
+    "extractingGeneric": "جاري الاستخراج...",
     "downloading": "جاري التنزيل {{percentage}}%",
     "downloadingMultiple": "جاري تنزيل {{count}} من النماذج...",
     "modelReady": "النموذج جاهز",
-    "loading": "...جاري تحميل {{modelName}}",
-    "loadingGeneric": "...جاري التحميل",
+    "loading": "جاري تحميل {{modelName}}...",
+    "loadingGeneric": "جاري التحميل...",
     "modelError": "خطأ في النموذج",
     "modelUnloaded": "تم إلغاء تحميل النموذج",
     "noModelDownloadRequired": "لا يوجد نموذج - التنزيل مطلوب",
@@ -145,7 +146,7 @@
     "capabilities": {
       "languageSelection": "يدعم اختيار اللغة",
       "singleLanguage": "يدعم هذه اللغة فقط",
-      "languageCount": "{{total}} languages",
+      "languageCount": "{{total}} لغة",
       "languageOnly": "{{language}} فقط",
       "translation": "يدعم الترجمة",
       "translate": "ترجمة",
@@ -159,10 +160,10 @@
       "shortcut": {
         "title": "اختصارات Handy",
         "description": "إعداد اختصارات لوحة المفاتيح لبدء تسجيل التفريغ الصوتي",
-        "loading": "...جاري تحميل الاختصارات",
+        "loading": "جاري تحميل الاختصارات...",
         "none": "لا توجد اختصارات مجهزة",
         "notFound": "الاختصار غير موجود",
-        "pressKeys": "...اضغط على المفاتيح",
+        "pressKeys": "اضغط على المفاتيح...",
         "bindings": {
           "transcribe": {
             "name": "اختصار التفريغ الصوتي",
@@ -190,9 +191,19 @@
         "noResults": "لم يتم العثور على لغات",
         "auto": "تلقائي"
       },
-      "pushToTalk": {
-        "label": "اضغط للتحدث",
-        "description": "استمر في الضغط للتسجيل، واترك للتوقف"
+      "shortcutActivation": {
+        "title": "سلوك الاختصار",
+        "description": "اختر كيفية بدء التسجيل وإيقافه باستخدام اختصار التفريغ الصوتي.",
+        "options": {
+          "holdOrToggle": "تلقائي",
+          "pushToTalk": "ضغط مطوّل",
+          "toggle": "تبديل"
+        },
+        "descriptions": {
+          "hold_or_toggle": "اضغط مطوّلًا للتسجيل أو انقر للتبديل",
+          "push_to_talk": "يسجّل أثناء الضغط على الاختصار",
+          "toggle": "انقر على الاختصار لبدء التسجيل، وانقر مرة أخرى للإيقاف"
+        }
       }
     },
     "sound": {
@@ -200,8 +211,14 @@
       "microphone": {
         "title": "الميكروفون",
         "description": "اختر جهاز الميكروفون المفضل لديك",
-        "placeholder": "...اختر الميكروفون",
-        "loading": "...جاري التحميل"
+        "placeholder": "اختر الميكروفون...",
+        "loading": "جاري التحميل..."
+      },
+      "channel": {
+        "title": "قناة الإدخال",
+        "description": "اختر قناة الإدخال التي تريد التسجيل منها. استخدم هذا الخيار إذا كانت واجهة الصوت لديك تحتوي على عدة مداخل.",
+        "average": "متوسط جميع القنوات",
+        "channel": "القناة {{n}}"
       },
       "audioFeedback": {
         "label": "تنبيهات صوتية",
@@ -210,8 +227,8 @@
       "outputDevice": {
         "title": "جهاز الإخراج",
         "description": "اختر جهاز إخراج الصوت المفضل لتنبيهات الصوت",
-        "placeholder": "...اختر جهاز الإخراج",
-        "loading": "...جاري التحميل"
+        "placeholder": "اختر جهاز الإخراج...",
+        "loading": "جاري التحميل..."
       },
       "volume": {
         "title": "مستوى الصوت",
@@ -261,12 +278,12 @@
       },
       "overlay": {
         "style": {
-          "title": "Overlay",
-          "description": "Choose the recording overlay: None hides it, Minimal shows a compact pill, Live shows transcription in real time as you speak (streaming-capable models only — look for the Streaming badge in the model picker). On Linux 'None' is recommended.",
+          "title": "التراكب",
+          "description": "اختر تراكب التسجيل: «بلا» يخفيه، و«مبسط» يعرض شارة صغيرة، و«مباشر» يعرض النص المكتوب فوريًا أثناء التحدث (النماذج التي تدعم البث فقط — ابحث عن شارة «البث» في منتقي النماذج). على Linux يُنصح باختيار «بلا».",
           "options": {
             "none": "بلا",
-            "minimal": "Minimal",
-            "live": "Live"
+            "minimal": "مبسط",
+            "live": "مباشر"
           }
         },
         "position": {
@@ -344,8 +361,29 @@
         "duplicate": "\"{{word}}\" موجود بالفعل"
       },
       "voiceActivityDetection": {
-        "title": "Voice Activity Detection",
-        "description": "Filter silence from recordings. Streaming-capable models use a longer VAD tail; disabling VAD records raw audio."
+        "title": "كشف النشاط الصوتي",
+        "description": "تصفية الصمت من التسجيلات. النماذج التي تدعم البث تستخدم فترة VAD أطول؛ وتعطيل VAD يسجّل الصوت الخام."
+      },
+      "vadBackend": {
+        "title": "محرك كشف النشاط الصوتي",
+        "description": "اختر الكاشف المستخدم لتصفية الصمت. Earshot تجريبي؛ ارجع إلى Silero إذا تم اقتطاع الكلام أو الاحتفاظ بالضوضاء.",
+        "options": {
+          "silero": "Silero",
+          "earshot": "Earshot"
+        }
+      },
+      "fillerWordRemoval": {
+        "title": "إزالة كلمات الحشو",
+        "description": "يزيل كلمات التردد الشائعة من النصوص. عطّل هذا الخيار للاحتفاظ بها."
+      },
+      "chineseScript": {
+        "title": "الكتابة الصينية",
+        "description": "يكتب نصوص الماندرين والكانتونية بالأحرف المبسطة أو التقليدية. لا تتغير اللغات الأخرى.",
+        "options": {
+          "asTranscribed": "كما نُسخ",
+          "simplified": "مبسطة",
+          "traditional": "تقليدية"
+        }
       }
     },
     "postProcessing": {
@@ -353,10 +391,18 @@
         "title": "مفتاح الاختصار"
       },
       "api": {
-        "title": "API (متوافق مع OpenAI)",
+        "title": "API",
         "provider": {
           "title": "المزود",
-          "description": "اختر مزوداً متوافقاً مع OpenAI."
+          "description": "اختر مزوداً متوافقاً مع OpenAI أو Anthropic."
+        },
+        "apiFormat": {
+          "title": "تنسيق API",
+          "description": "تنسيق الطلب الذي تتوقعه نقطة النهاية المخصصة الخاصة بك.",
+          "options": {
+            "openai": "متوافق مع OpenAI (Chat Completions)",
+            "anthropic": "Anthropic Messages"
+          }
         },
         "appleIntelligence": {
           "unavailable": "Apple Intelligence غير متاح على هذا الجهاز. يتطلب جهاز Mac بمعالج Apple Silicon يعمل بنظام macOS Tahoe (26.0) أو أحدث مع تمكين Apple Intelligence في إعدادات النظام."
@@ -364,7 +410,8 @@
         "baseUrl": {
           "title": "URL الأساسي",
           "description": "URL الأساسي لـ API للمزود المختار. يمكن تعديل المزود المخصص فقط.",
-          "placeholder": "https://api.openai.com/v1"
+          "placeholder": "https://api.openai.com/v1",
+          "placeholderAnthropic": "https://api.anthropic.com/v1"
         },
         "apiKey": {
           "title": "مفتاح API",
@@ -405,9 +452,10 @@
     "history": {
       "title": "السجل",
       "openFolder": "فتح مجلد التسجيلات",
-      "loading": "...جاري تحميل السجل",
+      "loading": "جاري تحميل السجل...",
       "empty": "!لا يوجد تفريغ صوتي بعد. ابدأ التسجيل لبناء سجلك",
       "copyToClipboard": "نسخ التفريغ إلى الحافظة",
+      "copyError": "تعذر نسخ التفريغ إلى الحافظة.",
       "save": "حفظ التفريغ",
       "unsave": "إزالة من المحفوظات",
       "delete": "حذف الإدخال",
@@ -440,7 +488,8 @@
       },
       "updateChecks": {
         "label": "التحقق من وجود تحديثات",
-        "description": "التحقق تلقائياً من وجود إصدارات جديدة من Handy"
+        "description": "التحقق تلقائياً من وجود إصدارات جديدة من Handy",
+        "lockedDescription": "معطّل بواسطة إعدادات النظام (HANDY_DISABLE_UPDATER)"
       },
       "soundTheme": {
         "label": "سمة الصوت",
@@ -499,9 +548,37 @@
         "title": "تأخير اللصق (بعد)",
         "description": "التأخير (بالمللي ثانية) بعد ضغطة مفتاح اللصق وقبل استعادة محتوى الحافظة السابق. قم بزيادته إذا تم لصق محتوى الحافظة القديم بدلاً من النص المُفرَّغ."
       },
+      "holdThreshold": {
+        "title": "حد الضغط المطوّل",
+        "description": "في الوضع التلقائي فقط: المدة (بالمللي ثانية) التي يجب الاستمرار في الضغط على الاختصار خلالها ليُعدّ ضغطًا مطوّلًا بدلًا من نقرة. قلّلها إذا ظلّ التسجيل مستمرًا بعد ضغطات مطوّلة قصيرة؛ وزدها إذا عُوملت النقرات المقصودة على أنها ضغط مطوّل."
+      },
+      "reliablePaste": {
+        "title": "لصق موثوق (Beta)",
+        "description": "استعادة الحافظة فقط بعد أن يقرأ التطبيق المستهدف النص المُفرَّغ فعلياً، بدلاً من الاعتماد على تأخير ثابت. يهدف إلى إصلاح لصق محتوى الحافظة القديم عند وجود حمل على النظام. يتطلب طريقة لصق تعتمد على الحافظة؛ على macOS وWindows فقط."
+      },
       "recordingBuffer": {
         "title": "مخزن التسجيل الإضافي",
         "description": "وقت إضافي (بالمللي ثانية) للاستمرار في التسجيل بعد تحرير المفتاح، لالتقاط الصوت المتبقي. 0 = لا مخزن إضافي."
+      },
+      "keyboardDiagnostic": {
+        "title": "تشخيص لوحة المفاتيح",
+        "description": "يتحقق مما إذا كانت أحداث لوحة المفاتيح تصل إلى Handy. يُسجَّل عدد الأحداث فقط — ولا تُسجَّل أبدًا المفاتيح التي تضغط عليها.",
+        "run": "تشغيل تشخيص لمدة 10 ثوانٍ",
+        "running": "جارٍ الاستماع… اضغط اختصارك عدة مرات (مثل Option+Space)",
+        "secureInputLabel": "Secure Input",
+        "enabled": "مُفعَّل",
+        "disabled": "مُعطَّل",
+        "holder": "يحتجزه {{name}} (pid {{pid}})",
+        "holderUnknown": "لا يوجد محتجِز ظاهر",
+        "keyDown": "ضغط مفتاح",
+        "keyUp": "تحرير مفتاح",
+        "flagsChanged": "مفاتيح التعديل",
+        "mouse": "الماوس",
+        "verdictBlocked": "يحجب Secure Input أحداث المفاتيح — لا يمكن للاختصارات التي تتضمن مفتاحًا عاديًا أن تعمل حتى تُحلّ المشكلة.",
+        "verdictSuspicious": "وصلت أحداث مفاتيح التعديل لكن لم يصل أي حدث مفتاح — هناك شيء يمنع المفاتيح رغم أن Secure Input يظهر معطلاً. يُرجى الإبلاغ عن ذلك على GitHub.",
+        "verdictOk": "أحداث المفاتيح تصل إلى Handy بشكل طبيعي.",
+        "verdictNoEvents": "لم يُسجَّل أي حدث — هل ضغطت أي مفاتيح أثناء الاختبار؟",
+        "failed": "فشل التشخيص: {{error}}"
       },
       "whatsNewPreview": {
         "title": "معاينة الجديد",
@@ -509,6 +586,13 @@
         "button": "معاينة",
         "noNotes": "لم يتم العثور على ملاحظات إصدار مضمنة",
         "error": "تعذرت معاينة ملاحظات الإصدار"
+      },
+      "onboardingPreview": {
+        "title": "معاينة الإعداد الأولي",
+        "description": "عاين شاشات الإعداد الأولي دون تغيير الأذونات أو النماذج أو حالة الإكمال",
+        "permissionsButton": "الأذونات",
+        "modelsButton": "اختيار النموذج",
+        "exitButton": "إنهاء المعاينة"
       }
     },
     "about": {
@@ -545,7 +629,7 @@
       }
     },
     "modelSettings": {
-      "title": "إعدادات النموذج"
+      "title": "إعدادات {{model}}"
     },
     "models": {
       "title": "نماذج النسخ",
@@ -556,7 +640,9 @@
       "deleteActiveConfirm": "{{modelName}} هو النموذج النشط حاليًا. حذفه سيوقف النسخ حتى تختار نموذجًا جديدًا. هل أنت متأكد؟",
       "deleteTitle": "حذف النموذج",
       "filters": {
-        "allLanguages": "جميع اللغات"
+        "allLanguages": "جميع اللغات",
+        "streaming": "تصفية النماذج التي تدعم النسخ المباشر",
+        "translation": "تصفية النماذج التي تدعم الترجمة إلى الإنجليزية"
       },
       "noModelsMatch": "لا توجد نماذج مطابقة لهذا الفلتر.",
       "searchPlaceholder": "ابحث عن النماذج بالاسم…",
@@ -567,20 +653,22 @@
     }
   },
   "footer": {
-    "checkingUpdates": "...جاري التحقق من وجود تحديثات",
+    "checkingUpdates": "جاري التحقق من وجود تحديثات...",
     "updateAvailableShort": "تحديث متاح",
     "upToDate": "محدث",
     "updateCheckingDisabled": "تم تعطيل التحقق من التحديث",
-    "downloading": "...جاري التنزيل {{progress}}%",
-    "installing": "...جاري التثبيت",
-    "preparing": "...جاري التحضير",
+    "downloading": "جاري التنزيل {{progress}}%...",
+    "installing": "جاري التثبيت...",
+    "preparing": "جاري التحضير...",
     "checkForUpdates": "التحقق من وجود تحديثات",
     "portableUpdateTitle": "التحديث اليدوي مطلوب",
-    "portableUpdateMessage": "لا يمكن تحديث التثبيتات المحمولة تلقائيًا. للتحديث: نزّل أحدث مثبّت NSIS من GitHub Releases، وثبّته في المجلد نفسه، ثم انسخ مجلد Data/ (الإعدادات والنماذج والتسجيلات) من الإصدار القديم إلى الجديد.",
-    "portableUpdateButton": "فتح GitHub Releases"
+    "portableUpdateMessage": "لا يمكن تحديث التثبيتات المحمولة تلقائيًا. نزّل المثبّت المناسب لنظامك من الزر أدناه، شغّله، وثبّته في المجلد نفسه — يبقى مجلد Data/ (الإعدادات والنماذج والتسجيلات) في مكانه.",
+    "portableUpdateButton": "تنزيل المثبّت",
+    "portableUpdateBrowseMessage": "لا يمكن تحديث التثبيتات المحمولة تلقائيًا. نزّل أحدث إصدار مناسب لنظامك من GitHub Releases وثبّته في المجلد نفسه — يبقى مجلد Data/ (الإعدادات والنماذج والتسجيلات) في مكانه.",
+    "portableUpdateBrowseButton": "فتح GitHub Releases"
   },
   "common": {
-    "loading": "...جاري التحميل",
+    "loading": "جاري التحميل...",
     "delete": "حذف",
     "close": "إغلاق",
     "open": "فتح",
@@ -624,10 +712,22 @@
     }
   },
   "overlay": {
-    "transcribing": "...جاري التفريغ",
-    "processing": "...جاري المعالجة"
+    "transcribing": "جاري التفريغ...",
+    "processing": "جاري المعالجة...",
+    "loadingModel": "جارٍ تحميل النموذج..."
   },
   "whatsNew": {
     "title": "الجديد في Handy v{{version}}"
+  },
+  "secureInput": {
+    "blockedWithCulprit_one": "قد يحظر {{name}} اختصارًا واحدًا",
+    "blockedWithCulprit_other": "قد يحظر {{name}} {{count}} اختصارات",
+    "blockedNoCulprit_one": "يحظر macOS مؤقتًا اختصارًا واحدًا",
+    "blockedNoCulprit_other": "يحظر macOS مؤقتًا {{count}} اختصارات",
+    "recorderBlockedWithCulprit": "قد يمنع {{name}} تغيير الاختصارات",
+    "recorderBlockedNoCulprit": "يمنع macOS مؤقتًا تغيير الاختصارات",
+    "learnMore": "كيفية الإصلاح",
+    "recorderBlocked": "لا يمكن تسجيل الاختصارات الآن — يحجب Secure Input في macOS أحداث المفاتيح. عالج تحذير Secure Input أولاً.",
+    "dismiss": "تجاهل"
   }
 }

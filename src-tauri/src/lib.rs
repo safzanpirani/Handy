@@ -3,16 +3,22 @@ mod actions;
 mod apple_intelligence;
 mod audio_feedback;
 pub mod audio_toolkit;
+mod autostart;
 mod catalog;
+mod chinese_script;
 pub mod cli;
 mod clipboard;
 mod commands;
+pub mod engine_supervisor;
 mod helpers;
 mod input;
 mod llm_client;
 mod managers;
+mod memory;
 mod overlay;
+mod paste_tx;
 pub mod portable;
+mod secure_input;
 mod settings;
 mod shortcut;
 mod signal_handle;
@@ -26,16 +32,13 @@ pub use cli::CliArgs;
 #[cfg(debug_assertions)]
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use tauri_specta::{collect_commands, collect_events, Builder};
+pub use utils::env_flag_enabled;
 
 use env_filter::Builder as EnvFilterBuilder;
 use managers::audio::AudioRecordingManager;
 use managers::history::HistoryManager;
 use managers::model::ModelManager;
 use managers::transcription::TranscriptionManager;
-#[cfg(unix)]
-use signal_hook::consts::{SIGUSR1, SIGUSR2};
-#[cfg(unix)]
-use signal_hook::iterator::Signals;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::image::Image;
@@ -43,7 +46,7 @@ pub use transcription_coordinator::TranscriptionCoordinator;
 
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Listener, Manager};
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_log::{Builder as LogBuilder, RotationStrategy, Target, TargetKind};
 
 use crate::settings::get_settings;
@@ -121,6 +124,42 @@ fn show_main_window(app: &AppHandle) {
     );
 }
 
+/// Choose the macOS activation policy the process *launches* with.
+///
+/// Must run between `build()` and `run()`: that is the only point where
+/// `App::set_activation_policy` sets tao's initial policy, which
+/// `applicationDidFinishLaunching` then applies directly. Calling the
+/// `AppHandle` variant from `setup` (which Tauri runs on `RunEvent::Ready`,
+/// i.e. after launch) is instead a runtime Regular → Accessory demotion of an
+/// already-activated foreground app — the transition Apple documents as
+/// unreliable, and what left a Dock icon behind for start-hidden and
+/// login-item launches on macOS 26+ (#1787). Launching as Accessory avoids the
+/// transition entirely; showing the window later promotes to Regular, which is
+/// the supported direction.
+///
+/// Mirrors the show-window decision in `setup`: the app launches without a
+/// Dock icon only when it will start hidden (setting or `--start-hidden`) AND a
+/// tray icon is available (setting and not `--no-tray`). With no tray the Dock
+/// icon stays as the only way back into the app (#903). Headless one-shot
+/// runs are left alone.
+#[cfg(target_os = "macos")]
+fn apply_startup_activation_policy(app: &mut tauri::App, headless_mode: bool) {
+    if headless_mode {
+        return;
+    }
+
+    let cli_args = app.state::<CliArgs>().inner().clone();
+    let settings = settings::get_settings(app.handle());
+
+    let should_hide = settings.start_hidden || cli_args.start_hidden;
+    let tray_available = settings.show_tray_icon && !cli_args.no_tray;
+
+    if should_hide && tray_available {
+        log::info!("Starting hidden with tray available: launching as Accessory (no Dock icon)");
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    }
+}
+
 #[allow(unused_variables)]
 fn should_force_show_permissions_window(app: &AppHandle) -> bool {
     #[cfg(target_os = "windows")]
@@ -172,11 +211,6 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     // Open the cloud socket now so the *first* dictation is as fast as the rest.
     // Non-blocking and best-effort; no-ops unless cloud STT is configured.
     transcription_manager.prewarm_cloud_stream();
-
-    // Initialize the transcribe-cpp native backend (logging + backend module
-    // registration) once, before any whisper model is loaded.
-    managers::transcription::init_transcribe_backend();
-
     // Apply accelerator preferences before any model loads
     managers::transcription::apply_accelerator_settings(app_handle);
 
@@ -185,33 +219,29 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(model_manager.clone());
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
-    app_handle.manage(tray::CurrentTrayIconState::new());
+    app_handle.manage(tray::TrayState::new());
 
     // Note: Shortcuts are NOT initialized here.
     // The frontend is responsible for calling the `initialize_shortcuts` command
     // after permissions are confirmed (on macOS) or after onboarding completes.
     // This matches the pattern used for Enigo initialization.
 
+    // Set up signal handlers for toggling transcription. On Linux, SIGUSR1 is
+    // deliberately not handled — it belongs to WebKitGTK's garbage collector
+    // (#1660) — see signal_handle.rs.
     #[cfg(unix)]
-    let signals = Signals::new([SIGUSR1, SIGUSR2]).unwrap();
-    // Set up signal handlers for toggling transcription
-    #[cfg(unix)]
-    signal_handle::setup_signal_handler(app_handle.clone(), signals);
+    signal_handle::setup_signal_handler(app_handle.clone());
 
-    // Apply macOS Accessory policy if starting hidden and tray is available.
-    // If the tray icon is disabled, keep the dock icon so the user can reopen.
-    #[cfg(target_os = "macos")]
-    {
-        let settings = settings::get_settings(app_handle);
-        if settings.start_hidden && settings.show_tray_icon {
-            let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
-        }
-    }
+    // The macOS activation policy for a start-hidden launch is applied before
+    // the event loop runs (see `apply_startup_activation_policy`), not here:
+    // by the time `setup` runs the app has already launched as a Regular
+    // (Dock) app, and demoting it at runtime is unreliable (#1787).
+
     // Get the current theme to set the appropriate initial icon
     let initial_theme = tray::get_current_theme(app_handle);
 
     // Choose the appropriate initial icon based on theme
-    let initial_icon_path = tray::get_icon_path(initial_theme, tray::TrayIconState::Idle);
+    let initial_icon_path = tray::get_icon_path(initial_theme, tray::TrayIconState::Idle, false);
 
     let mut tray_builder = TrayIconBuilder::new()
         .icon(
@@ -260,9 +290,13 @@ fn initialize_core_logic(app_handle: &AppHandle) {
             "settings" => {
                 show_main_window(app);
             }
+            "secure_input_warning" => {
+                // Full explanation lives in the settings-window banner
+                show_main_window(app);
+            }
             "check_updates" => {
                 let settings = settings::get_settings(app);
-                if settings.update_checks_enabled {
+                if settings::update_checks_effectively_enabled(&settings) {
                     show_main_window(app);
                     let _ = app.emit("check-for-updates", ());
                 }
@@ -276,10 +310,8 @@ fn initialize_core_logic(app_handle: &AppHandle) {
                     log::warn!("No model is currently loaded.");
                     return;
                 }
-                match transcription_manager.unload_model() {
-                    Ok(()) => log::info!("Model unloaded via tray."),
-                    Err(e) => log::error!("Failed to unload model via tray: {}", e),
-                }
+                transcription_manager.request_unload();
+                log::info!("Model unloaded via tray.");
             }
             "cancel" => {
                 use crate::utils::cancel_current_operation;
@@ -306,7 +338,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
                             log::error!("Failed to switch model via tray: {}", e);
                         }
                     }
-                    tray::update_tray_menu(&app_clone, None);
+                    tray::update_tray_menu(&app_clone);
                 });
             }
             _ => {}
@@ -316,7 +348,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(tray);
 
     // Initialize tray menu with idle state
-    utils::update_tray_menu(app_handle, None);
+    tray::update_tray_menu(app_handle);
 
     // Apply show_tray_icon setting
     let settings = settings::get_settings(app_handle);
@@ -327,20 +359,12 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     // Refresh tray menu when model state changes
     let app_handle_for_listener = app_handle.clone();
     app_handle.listen("model-state-changed", move |_| {
-        tray::update_tray_menu(&app_handle_for_listener, None);
+        tray::update_tray_menu(&app_handle_for_listener);
     });
 
-    // Get the autostart manager and configure based on user setting
-    let autostart_manager = app_handle.autolaunch();
-    let settings = settings::get_settings(app_handle);
-
-    if settings.autostart_enabled {
-        // Enable autostart if user has opted in
-        let _ = autostart_manager.enable();
-    } else {
-        // Disable autostart if user has opted out
-        let _ = autostart_manager.disable();
-    }
+    // Apply the autostart preference (SMAppService login item on macOS 13+,
+    // tauri-plugin-autostart elsewhere)
+    autostart::apply_autostart(app_handle, settings.autostart_enabled);
 
     // Create the recording overlay window (hidden by default)
     utils::create_recording_overlay(app_handle);
@@ -350,7 +374,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 #[specta::specta]
 fn trigger_update_check(app: AppHandle) -> Result<(), String> {
     let settings = settings::get_settings(&app);
-    if !settings.update_checks_enabled {
+    if !settings::update_checks_effectively_enabled(&settings) {
         return Ok(());
     }
     app.emit("check-for-updates", ())
@@ -413,7 +437,14 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
     // --list-devices: print registered compute devices (with indices) and exit.
     // Useful on multi-GPU machines to discover the index for --device-index.
     if args.list_devices {
-        let devices = crate::managers::transcription::describe_compute_devices();
+        let tm = app.state::<Arc<TranscriptionManager>>();
+        let devices = match crate::managers::transcription::describe_compute_devices(&tm) {
+            Ok(devices) => devices,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return 1;
+            }
+        };
         if devices.is_empty() {
             println!("No transcribe-cpp compute devices registered.");
         } else {
@@ -597,6 +628,24 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(cli_args: CliArgs) {
+    // Avoid ggml-metal residency-set teardown assertions when a native engine
+    // outlives the Tauri shutdown sequence (#1902). This must happen before
+    // transcribe-cpp initializes its Metal device. Advanced users can restore
+    // upstream residency behavior with HANDY_METAL_RESIDENCY=1.
+    #[cfg(target_os = "macos")]
+    if std::env::var("HANDY_METAL_RESIDENCY").as_deref() == Ok("1") {
+        // ggml treats GGML_METAL_NO_RESIDENCY as presence-based, so remove an
+        // inherited value as well when explicitly opting back in.
+        std::env::remove_var("GGML_METAL_NO_RESIDENCY");
+    } else {
+        std::env::set_var("GGML_METAL_NO_RESIDENCY", "1");
+    }
+
+    // Pin glibc's dynamic mmap threshold before the first large allocation,
+    // so per-dictation transient buffers are returned to the OS on free
+    // instead of accumulating in malloc arenas (#1792). No-op off Linux/glibc.
+    memory::init_allocator();
+
     // Detect portable mode before anything else
     portable::init();
 
@@ -608,7 +657,8 @@ pub fn run(cli_args: CliArgs) {
         .commands(collect_commands![
             shortcut::change_binding,
             shortcut::reset_binding,
-            shortcut::change_ptt_setting,
+            shortcut::change_shortcut_activation_setting,
+            shortcut::change_hold_threshold_ms_setting,
             shortcut::change_audio_feedback_setting,
             shortcut::change_audio_feedback_volume_setting,
             shortcut::change_sound_theme_setting,
@@ -623,6 +673,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_extra_recording_buffer_setting,
             shortcut::change_paste_delay_ms_setting,
             shortcut::change_paste_delay_after_ms_setting,
+            shortcut::change_reliable_paste_setting,
             shortcut::change_paste_method_setting,
             shortcut::get_available_typing_tools,
             shortcut::change_typing_tool_setting,
@@ -633,6 +684,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_post_process_enabled_setting,
             shortcut::change_experimental_enabled_setting,
             shortcut::change_post_process_base_url_setting,
+            shortcut::change_post_process_api_format_setting,
             shortcut::change_post_process_api_key_setting,
             shortcut::change_post_process_model_setting,
             shortcut::set_post_process_provider,
@@ -642,12 +694,19 @@ pub fn run(cli_args: CliArgs) {
             shortcut::delete_post_process_prompt,
             shortcut::set_post_process_selected_prompt,
             shortcut::update_custom_words,
-            shortcut::suspend_binding,
-            shortcut::resume_binding,
+            shortcut::suspend_all_bindings,
+            shortcut::resume_all_bindings,
             shortcut::change_mute_while_recording_setting,
             shortcut::change_append_trailing_space_setting,
             shortcut::change_lazy_stream_close_setting,
             shortcut::change_vad_enabled_setting,
+            shortcut::change_vad_backend_setting,
+            shortcut::change_cloud_stt_enabled_setting,
+            shortcut::change_cloud_stt_api_key_setting,
+            shortcut::change_cloud_stt_model_setting,
+            shortcut::test_cloud_stt_api_key,
+            shortcut::change_filler_word_removal_enabled_setting,
+            shortcut::change_chinese_script_setting,
             shortcut::change_app_language_setting,
             shortcut::change_update_checks_setting,
             shortcut::change_show_whats_new_on_update_setting,
@@ -661,10 +720,13 @@ pub fn run(cli_args: CliArgs) {
             shortcut::get_available_accelerators,
             shortcut::handy_keys::start_handy_keys_recording,
             shortcut::handy_keys::stop_handy_keys_recording,
+            secure_input::get_secure_input_status,
+            secure_input::run_keyboard_diagnostic,
             trigger_update_check,
             show_main_window_command,
             commands::cancel_operation,
             commands::is_portable,
+            commands::is_update_checks_locked,
             commands::get_app_dir_path,
             commands::get_app_settings,
             commands::get_default_settings,
@@ -682,6 +744,7 @@ pub fn run(cli_args: CliArgs) {
             commands::models::delete_model,
             commands::models::cancel_download,
             commands::models::set_active_model,
+            commands::models::finish_onboarding_without_model,
             commands::models::get_current_model,
             commands::models::get_transcription_model_status,
             commands::models::is_model_loading,
@@ -701,6 +764,8 @@ pub fn run(cli_args: CliArgs) {
             commands::audio::set_clamshell_microphone,
             commands::audio::get_clamshell_microphone,
             commands::audio::is_recording,
+            commands::audio::get_microphone_channels,
+            commands::audio::set_selected_channel,
             commands::transcription::set_model_unload_timeout,
             commands::transcription::get_model_load_status,
             commands::transcription::unload_model_manually,
@@ -805,12 +870,21 @@ pub fn run(cli_args: CliArgs) {
             } else if args.iter().any(|a| a == "--cancel") {
                 crate::utils::cancel_current_operation(app);
             } else {
+                // A second process was launched without remote-control flags
+                // (e.g. the binary run from a shell). On macOS, relaunching the
+                // bundle from Spotlight/Finder/Dock does not start a process —
+                // it arrives as RunEvent::Reopen below — but treat this the
+                // same way: raise the window and recreate a possibly vanished
+                // tray icon (#1948).
+                #[cfg(target_os = "macos")]
+                tray::recreate_tray_icon(app);
                 show_main_window(app);
             }
         }));
     }
 
-    builder
+    #[allow(unused_mut)]
+    let mut app = builder
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -826,6 +900,13 @@ pub fn run(cli_args: CliArgs) {
         ))
         .manage(cli_args.clone())
         .setup(move |app| {
+            #[cfg(target_os = "windows")]
+            log::info!(
+                "Vulkan layer policy: VK_LOADER_LAYERS_DISABLE={:?}, HANDY_KEEP_VULKAN_IMPLICIT_LAYERS={}",
+                std::env::var_os("VK_LOADER_LAYERS_DISABLE"),
+                utils::env_flag_enabled("HANDY_KEEP_VULKAN_IMPLICIT_LAYERS"),
+            );
+
             specta_builder.mount_events(app);
 
             // Headless one-shot path (`--transcribe-file` / `--list-devices` /
@@ -844,18 +925,17 @@ pub fn run(cli_args: CliArgs) {
                     TranscriptionManager::new(&app_handle, model_manager.clone())
                         .expect("Failed to initialize transcription manager"),
                 );
+                managers::transcription::report_compute_devices(&transcription_manager);
                 app_handle.manage(model_manager);
                 app_handle.manage(transcription_manager);
-                managers::transcription::init_transcribe_backend();
                 managers::transcription::apply_accelerator_settings(&app_handle);
 
                 let handle = app_handle.clone();
                 let args = cli_args.clone();
                 std::thread::spawn(move || {
                     let code = run_headless_guarded(|| run_headless_transcription(&handle, &args));
-                    // Drop the loaded engine before teardown: ggml-metal's global
-                    // device free asserts (SIGABRT) if a model's Metal resources
-                    // are still alive at C++ static-destructor time.
+                    // Drop the loaded engine before exit so its transcription
+                    // worker is told to shut down cleanly.
                     if let Some(tm) = handle.try_state::<Arc<TranscriptionManager>>() {
                         let _ = tm.unload_model();
                     }
@@ -885,15 +965,41 @@ pub fn run(cli_args: CliArgs) {
                 win_builder = win_builder.data_directory(data_dir.join("webview"));
             }
 
-            win_builder.build()?;
+            // Only used on Windows, to disable WebView2 browser accelerators.
+            #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+            let main_window = win_builder.build()?;
+
+            // Disable WebView2 browser accelerators (F5, F6, Ctrl+F, F12, ...).
+            // A settings window has no use for them, and pressing F6 while
+            // recording a shortcut was reported to turn the whole window white
+            // (cjpais/Handy#1940), likely by triggering WebView2 focus cycling.
+            // DevTools stays enabled; only the F12 accelerator is lost.
+            #[cfg(target_os = "windows")]
+            {
+                let _ = main_window.with_webview(|webview| unsafe {
+                    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+                    use windows::core::Interface;
+
+                    let result = webview
+                        .controller()
+                        .CoreWebView2()
+                        .and_then(|core| core.Settings())
+                        .and_then(|settings| settings.cast::<ICoreWebView2Settings3>())
+                        .and_then(|settings| settings.SetAreBrowserAcceleratorKeysEnabled(false));
+
+                    if let Err(error) = result {
+                        log::warn!("Failed to disable WebView2 browser accelerators: {error}");
+                    }
+                });
+            }
 
             let mut settings = get_settings(app.handle());
 
-            // Apply the persisted appearance theme to the Windows title bar before
+            // Apply the persisted appearance theme to the native title bar before
             // the window is shown, so it matches the in-app palette without a flash
-            // of the wrong theme. On macOS/Linux, Tauri themes are app-wide and
-            // would also affect windows that intentionally keep the system theme.
-            #[cfg(target_os = "windows")]
+            // of the wrong theme. See `apply_window_theme` for what this does per
+            // platform.
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             shortcut::apply_window_theme(app.handle(), settings.theme);
 
             // CLI --debug flag overrides debug_mode and log level (runtime-only, not persisted)
@@ -915,6 +1021,11 @@ pub fn run(cli_args: CliArgs) {
 
             initialize_core_logic(&app_handle);
 
+            // Secure Input monitor (macOS): detects stuck secure input that
+            // silently blocks keyed shortcuts, warns the user, and activates
+            // the Carbon fallback. See secure_input.rs and issue #1578.
+            secure_input::init(&app_handle);
+
             // Populate the overlay-enabled cache from initial settings so the
             // audio path (overlay::emit_levels, called ~24 Hz during recording)
             // can do a single atomic load instead of reading the Tauri store.
@@ -924,12 +1035,19 @@ pub fn run(cli_args: CliArgs) {
             );
 
             // Pre-warm GPU/accelerator enumeration on a background thread. The first
-            // get_available_accelerators call enumerates ORT execution providers and
-            // transcribe-cpp compute devices, which can take a moment; without this
+            // device listing opens the GPU, which on macOS loads ggml's Metal library
+            // and compiles it when the system shader cache does not have it yet, so it
+            // stays off the startup path. get_available_accelerators then enumerates
+            // ORT execution providers and transcribe-cpp compute devices; without this
             // the cost is paid synchronously when the user first opens Advanced
-            // settings, freezing the UI. Result is cached in a OnceLock.
-            std::thread::spawn(|| {
-                let _ = crate::managers::transcription::get_available_accelerators();
+            // settings, freezing the UI. The device list is kept by the
+            // transcription engine and refreshed by every worker it starts that may
+            // use the GPU (CPU-only workers can't see it).
+            let devices_app_handle = app_handle.clone();
+            std::thread::spawn(move || {
+                let tm = devices_app_handle.state::<Arc<TranscriptionManager>>();
+                crate::managers::transcription::report_compute_devices(&tm);
+                let _ = crate::managers::transcription::get_available_accelerators(&tm);
             });
 
             // Hide tray icon if --no-tray was passed
@@ -945,6 +1063,7 @@ pub fn run(cli_args: CliArgs) {
 
             // If start_hidden but tray is disabled, we must show the window
             // anyway. Without a tray icon, the dock is the only way back in.
+            // Keep in sync with `apply_startup_activation_policy` (macOS).
             let tray_available = settings.show_tray_icon && !cli_args.no_tray;
             if should_force_show || !should_hide || !tray_available {
                 show_main_window(&app_handle);
@@ -983,18 +1102,36 @@ pub fn run(cli_args: CliArgs) {
         })
         .invoke_handler(invoke_handler)
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| match &event {
-            #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { .. } => {
-                show_main_window(app);
+        .expect("error while building tauri application");
+
+    // Must sit between build() and run(): see the doc comment.
+    #[cfg(target_os = "macos")]
+    apply_startup_activation_policy(&mut app, headless_mode);
+
+    // `app` is only used by the macOS arm.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    app.run(|app, event| match &event {
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => {
+            // Fired when the already-running bundle is launched again from
+            // Spotlight/Finder or the Dock icon is clicked. If the settings
+            // window is hidden, the user is likely looking for a tray icon
+            // that vanished (#1948): recreate it. When the window is
+            // already visible this is just a focus request and the tray is
+            // left alone.
+            let window_visible = app
+                .get_webview_window("main")
+                .and_then(|w| w.is_visible().ok())
+                .unwrap_or(false);
+            if !window_visible {
+                tray::recreate_tray_icon(app);
             }
-            // Teardown transcribe.cpp before exit
-            tauri::RunEvent::Exit => {
-                if let Some(tm) = app.try_state::<Arc<TranscriptionManager>>() {
-                    let _ = tm.unload_model();
-                }
-            }
-            _ => {}
-        });
+            show_main_window(app);
+        }
+        // No transcription teardown on exit: transcribe.cpp runs only in the
+        // worker process, which exits by itself as soon as this process's end
+        // of its stdin closes, even if it is hung. Waiting on an unload here
+        // could block quitting behind a hung model load.
+        _ => {}
+    });
 }

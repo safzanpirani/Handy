@@ -6,7 +6,8 @@
     "unloadModel": "Unload Model",
     "model": "Model",
     "quit": "Quit",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "secureInputWarning": "⚠ Shortcuts blocked by Secure Input"
   },
   "sidebar": {
     "general": "General",
@@ -117,6 +118,14 @@
         "checkFailed": "Failed to check permissions. Please try again.",
         "requestFailed": "Failed to request permission. Please try again."
       }
+    },
+    "noDownload": {
+      "title": "Don't want to download a model?",
+      "cloud": {
+        "title": "Use Deepgram cloud transcription",
+        "description": "Nothing to download. Audio streams to Deepgram while you speak. Needs a free Deepgram account and an internet connection."
+      },
+      "skip": "Skip for now and choose later in Settings"
     }
   },
   "modelSelector": {
@@ -193,9 +202,19 @@
         "noResults": "No languages found",
         "auto": "Auto"
       },
-      "pushToTalk": {
-        "label": "Push To Talk",
-        "description": "Hold to record, release to stop"
+      "shortcutActivation": {
+        "title": "Shortcut Behavior",
+        "description": "Choose how the transcribe shortcut starts and stops recording.",
+        "options": {
+          "holdOrToggle": "Auto",
+          "pushToTalk": "Hold",
+          "toggle": "Toggle"
+        },
+        "descriptions": {
+          "hold_or_toggle": "Hold to record or tap to toggle",
+          "push_to_talk": "Records while you hold the shortcut",
+          "toggle": "Tap the shortcut to start recording, tap again to stop"
+        }
       }
     },
     "models": {
@@ -208,7 +227,9 @@
       "deleteActiveConfirm": "{{modelName}} is your active model. Deleting it will stop transcriptions until you select a new model. Are you sure?",
       "deleteTitle": "Delete Model",
       "filters": {
-        "allLanguages": "All Languages"
+        "allLanguages": "All Languages",
+        "streaming": "Filter models that support live streaming transcription",
+        "translation": "Filter models that support translation to English"
       },
       "rescan": {
         "label": "Rescan",
@@ -223,6 +244,12 @@
         "description": "Select your preferred microphone device",
         "placeholder": "Select microphone...",
         "loading": "Loading..."
+      },
+      "channel": {
+        "title": "Input Channel",
+        "description": "Select which input channel to record from. Use this if your audio interface has multiple inputs.",
+        "average": "Average all channels",
+        "channel": "Channel {{n}}"
       },
       "audioFeedback": {
         "label": "Audio Feedback",
@@ -367,6 +394,27 @@
       "voiceActivityDetection": {
         "title": "Voice Activity Detection",
         "description": "Filter silence from recordings. Streaming-capable models use a longer VAD tail; disabling VAD records raw audio."
+      },
+      "vadBackend": {
+        "title": "Voice Activity Backend",
+        "description": "Choose the detector used to filter silence. Earshot is experimental; switch back to Silero if speech is clipped or noise is retained.",
+        "options": {
+          "silero": "Silero",
+          "earshot": "Earshot"
+        }
+      },
+      "fillerWordRemoval": {
+        "title": "Remove Filler Words",
+        "description": "Removes common hesitation words from transcriptions. Turn off to keep them."
+      },
+      "chineseScript": {
+        "title": "Chinese Script",
+        "description": "Writes Mandarin and Cantonese transcriptions in Simplified or Traditional characters. Other languages are left unchanged.",
+        "options": {
+          "asTranscribed": "As Transcribed",
+          "simplified": "Simplified",
+          "traditional": "Traditional"
+        }
       }
     },
     "postProcessing": {
@@ -374,10 +422,18 @@
         "title": "Hotkey"
       },
       "api": {
-        "title": "API (OpenAI Compatible)",
+        "title": "API",
         "provider": {
           "title": "Provider",
-          "description": "Select an OpenAI-compatible provider."
+          "description": "Select an OpenAI-compatible or Anthropic-compatible provider."
+        },
+        "apiFormat": {
+          "title": "API Format",
+          "description": "Request format expected by your custom endpoint.",
+          "options": {
+            "openai": "OpenAI Compatible (Chat Completions)",
+            "anthropic": "Anthropic Messages"
+          }
         },
         "appleIntelligence": {
           "unavailable": "Apple Intelligence is not available on this device. Requires an Apple Silicon Mac running macOS Tahoe (26.0) or later with Apple Intelligence enabled in System Settings."
@@ -385,7 +441,8 @@
         "baseUrl": {
           "title": "Base URL",
           "description": "API base URL for the selected provider. Only the custom provider can be edited.",
-          "placeholder": "https://api.openai.com/v1"
+          "placeholder": "https://api.openai.com/v1",
+          "placeholderAnthropic": "https://api.anthropic.com/v1"
         },
         "apiKey": {
           "title": "API Key",
@@ -429,6 +486,7 @@
       "loading": "Loading history...",
       "empty": "No transcriptions yet. Start recording to build your history!",
       "copyToClipboard": "Copy transcription to clipboard",
+      "copyError": "Failed to copy transcription to clipboard.",
       "save": "Save transcription",
       "unsave": "Remove from saved",
       "delete": "Delete entry",
@@ -461,7 +519,8 @@
       },
       "updateChecks": {
         "label": "Check for Updates",
-        "description": "Automatically check for new versions of Handy"
+        "description": "Automatically check for new versions of Handy",
+        "lockedDescription": "Disabled by system configuration (HANDY_DISABLE_UPDATER)"
       },
       "whatsNewPreview": {
         "title": "Preview What's New",
@@ -469,6 +528,13 @@
         "button": "Preview",
         "noNotes": "No bundled release notes found",
         "error": "Failed to preview release notes"
+      },
+      "onboardingPreview": {
+        "title": "Preview Onboarding",
+        "description": "Preview onboarding screens without changing permissions, models, or completion state",
+        "permissionsButton": "Permissions",
+        "modelsButton": "Model Selection",
+        "exitButton": "Exit Preview"
       },
       "soundTheme": {
         "label": "Sound Theme",
@@ -527,9 +593,37 @@
         "title": "Paste Delay (After)",
         "description": "Delay (in milliseconds) after the paste keystroke, before restoring your previous clipboard. Increase if your old clipboard content is being pasted instead of the transcription."
       },
+      "holdThreshold": {
+        "title": "Hold Threshold",
+        "description": "Auto mode only: how long (in milliseconds) the shortcut must be held before it counts as a hold instead of a tap. Lower if short holds keep leaving recording on; raise if deliberate taps get treated as holds."
+      },
+      "reliablePaste": {
+        "title": "Reliable Paste (Beta)",
+        "description": "Restore the clipboard only after the target app actually reads the transcription, instead of after a fixed delay. Intended to fix old clipboard content being pasted under system load. Requires a clipboard paste method; macOS and Windows only."
+      },
       "recordingBuffer": {
         "title": "Extra Recording Buffer",
         "description": "Extra time (in milliseconds) to keep recording after you release the key, to capture trailing audio. 0 = no extra buffer."
+      },
+      "keyboardDiagnostic": {
+        "title": "Keyboard Diagnostic",
+        "description": "Checks whether keyboard events reach Handy. Only event counts are recorded — never which keys you press.",
+        "run": "Run 10s diagnostic",
+        "running": "Listening… press your shortcut a few times (e.g. Option+Space)",
+        "secureInputLabel": "Secure Input",
+        "enabled": "enabled",
+        "disabled": "disabled",
+        "holder": "held by {{name}} (pid {{pid}})",
+        "holderUnknown": "no visible holder",
+        "keyDown": "Key down",
+        "keyUp": "Key up",
+        "flagsChanged": "Modifiers",
+        "mouse": "Mouse",
+        "verdictBlocked": "Secure Input is blocking key events — keyed shortcuts cannot work until it is resolved.",
+        "verdictSuspicious": "Modifier events arrived but no key events — something is suppressing keys even though Secure Input reports disabled. Please report this on GitHub.",
+        "verdictOk": "Key events are reaching Handy normally.",
+        "verdictNoEvents": "No events captured — did you press any keys during the test?",
+        "failed": "Diagnostic failed: {{error}}"
       }
     },
     "about": {
@@ -569,7 +663,7 @@
       "title": "Cloud Transcription",
       "toggle": {
         "label": "Use cloud transcription",
-        "description": "Send recorded audio to a hosted speech-to-text API (Deepgram) instead of running a model locally. No model download is needed, but every dictation requires a network connection and the audio leaves your machine. Live preview is unavailable in this mode."
+        "description": "Stream audio to Deepgram instead of running a model locally. No model download is needed, but every dictation needs a network connection and the audio leaves your machine. Live preview works in this mode."
       },
       "apiKey": {
         "title": "Deepgram API key",
@@ -578,7 +672,7 @@
       },
       "model": {
         "title": "Model",
-        "description": "Deepgram model id, e.g. nova-3. Custom words are sent as keyterm bias on nova-3 models."
+        "description": "nova-3 is the default and works in every language. Flux models end turns faster but are streaming-only; if a stream fails, Handy retries the recording with nova-3. Custom words are sent as keyterms."
       }
     }
   },
@@ -592,8 +686,10 @@
     "preparing": "Preparing...",
     "checkForUpdates": "Check for updates",
     "portableUpdateTitle": "Manual update required",
-    "portableUpdateMessage": "Portable installs cannot be updated automatically. To update: download the latest NSIS installer from GitHub Releases, install it to the same folder, then copy your Data/ folder (settings, models, recordings) from the old version to the new one.",
-    "portableUpdateButton": "Open GitHub Releases"
+    "portableUpdateMessage": "Portable installs cannot be updated automatically. Download the installer for your system below, run it, and install to the same folder — your Data/ folder (settings, models, recordings) is kept in place.",
+    "portableUpdateButton": "Download installer",
+    "portableUpdateBrowseMessage": "Portable installs cannot be updated automatically. Download the latest version for your system from GitHub Releases and install it to the same folder — your Data/ folder (settings, models, recordings) is kept in place.",
+    "portableUpdateBrowseButton": "Open GitHub Releases"
   },
   "whatsNew": {
     "title": "New in Handy v{{version}}"
@@ -627,7 +723,9 @@
     "modelLoadFailedUnknown": "unknown model",
     "pasteFailedTitle": "Failed to Paste Text",
     "pasteFailed": "Text could not be pasted into the active application.",
-    "transcriptionFailedTitle": "Transcription Failed"
+    "transcriptionFailedTitle": "Transcription Failed",
+    "enhancementFailedTitle": "Enhancement Failed",
+    "enhancementFailed": "{{reason}} Original transcription was inserted."
   },
   "appLanguage": {
     "title": "Application Language",
@@ -644,6 +742,60 @@
   },
   "overlay": {
     "transcribing": "Transcribing...",
-    "processing": "Processing..."
+    "processing": "Processing...",
+    "loadingModel": "Loading model..."
+  },
+  "secureInput": {
+    "blockedWithCulprit_one": "{{name}} may be blocking 1 shortcut",
+    "blockedWithCulprit_other": "{{name}} may be blocking {{count}} shortcuts",
+    "blockedNoCulprit_one": "macOS is temporarily blocking 1 shortcut",
+    "blockedNoCulprit_other": "macOS is temporarily blocking {{count}} shortcuts",
+    "recorderBlockedWithCulprit": "{{name}} may be blocking shortcut changes",
+    "recorderBlockedNoCulprit": "macOS is temporarily blocking shortcut changes",
+    "learnMore": "How to fix",
+    "recorderBlocked": "Can't record shortcuts right now — macOS Secure Input is blocking key events. Resolve the Secure Input warning first.",
+    "dismiss": "Dismiss"
+  },
+  "cloudSetup": {
+    "title": "Set up Deepgram",
+    "intro": "Handy streams your voice to Deepgram while you hold the shortcut, so text is ready the moment you let go. This takes about two minutes.",
+    "steps": {
+      "account": {
+        "title": "Create a Deepgram account",
+        "body": "Sign up with email, Google, or GitHub. New accounts start with free credit, and no card is needed.",
+        "link": "Open Deepgram sign-up"
+      },
+      "key": {
+        "title": "Create an API key",
+        "openConsole": "Open the Deepgram console and pick your project in the top-left menu.",
+        "openSettings": "Open Settings, then the API Keys tab.",
+        "create": "Click Create a New API Key. Any name works, and the default Member permission is enough.",
+        "copy": "Copy the key secret. Deepgram shows it only once.",
+        "consoleLink": "Open the Deepgram console",
+        "docsLink": "Deepgram's guide"
+      },
+      "paste": {
+        "title": "Paste the key and check it"
+      },
+      "model": {
+        "title": "Choose a model"
+      }
+    },
+    "key": {
+      "check": "Check key",
+      "checking": "Checking with Deepgram…",
+      "valid": "Key works."
+    },
+    "models": {
+      "nova3": "Default · widest language support",
+      "fluxEn": "Fastest turn ends · English only",
+      "fluxMulti": "Fastest turn ends · 10 languages"
+    },
+    "privacy": "Audio from each dictation is sent to Deepgram. Your key is stored only on this computer. You can switch back to a local model in Settings → Models at any time.",
+    "back": "Back to models",
+    "finish": "Use Deepgram",
+    "saving": "Saving…",
+    "showGuide": "How do I get a key?",
+    "hideGuide": "Hide the guide"
   }
 }

@@ -1,6 +1,7 @@
 use crate::managers::model::{ModelInfo, ModelManager};
 use crate::managers::transcription::{ModelStateEvent, TranscriptionManager};
 use crate::settings::{get_settings, write_settings, ModelUnloadTimeout};
+use log::error;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -48,6 +49,9 @@ pub async fn download_model(
         .map_err(|e| e.to_string());
 
     if let Err(ref error) = result {
+        // Log as well as emit: the toast is transient, and failed downloads have
+        // historically been undiagnosable because logs showed nothing (#1579).
+        error!("Model download failed for {}: {}", model_id, error);
         let _ = app_handle.emit(
             "model-download-failed",
             serde_json::json!({ "model_id": &model_id, "error": error }),
@@ -68,8 +72,12 @@ pub async fn delete_model(
     // If deleting the active model, unload it and clear the setting
     let settings = get_settings(&app_handle);
     if settings.selected_model == model_id {
-        transcription_manager
-            .unload_model()
+        // Waits for the worker to exit (behind any transcription in progress)
+        // before the file is deleted, so keep it off the async workers.
+        let tm = Arc::clone(&transcription_manager);
+        tauri::async_runtime::spawn_blocking(move || tm.unload_model())
+            .await
+            .map_err(|e| format!("Failed to unload model: {}", e))?
             .map_err(|e| format!("Failed to unload model: {}", e))?;
 
         let mut settings = get_settings(&app_handle);
@@ -163,6 +171,17 @@ pub async fn set_active_model(
     model_id: String,
 ) -> Result<(), String> {
     switch_active_model(&app_handle, &model_id)
+}
+
+/// Finish onboarding without choosing a local model, for users who transcribe
+/// through a cloud provider or will download a model later from Settings.
+#[tauri::command]
+#[specta::specta]
+pub fn finish_onboarding_without_model(app_handle: AppHandle) -> Result<(), String> {
+    let mut settings = get_settings(&app_handle);
+    settings.onboarding_completed = true;
+    write_settings(&app_handle, settings);
+    Ok(())
 }
 
 #[tauri::command]

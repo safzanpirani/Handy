@@ -1,10 +1,9 @@
 //! Cloud speech-to-text backends.
 //!
-//! Handy transcribes locally by default (whisper.cpp / Parakeet). This module
-//! adds an optional cloud path that bypasses the local engine entirely: the
-//! recorded samples are shipped to a hosted STT API and the returned text
-//! re-enters the normal pipeline (custom-word correction, then LLM
-//! post-processing), so everything downstream of `transcribe()` is unchanged.
+//! Handy transcribes locally by default. This module adds an optional cloud
+//! path that bypasses the local engine entirely: audio streams to a hosted STT
+//! API and the returned text re-enters the normal pipeline (filler removal,
+//! then LLM post-processing), so everything downstream is unchanged.
 //!
 //! Only Deepgram is implemented today, but the request struct is deliberately
 //! provider-shaped so a second backend slots in beside it.
@@ -16,27 +15,17 @@ use serde::Deserialize;
 use std::time::Duration;
 
 pub const DEEPGRAM_PROVIDER_ID: &str = "deepgram";
+/// nova-3 streams over `/v1/listen` with interim results, takes keyterms, and
+/// is also what the batch fallback uses.
 pub const DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
-/// Whether the model takes decode-time keyterm bias.
-///
-/// Callers use this to decide whether the local fuzzy custom-word pass still
-/// needs to run: when Deepgram has already been told the terms, re-correcting
-/// its output only risks rewriting words it got right.
-pub fn model_accepts_keyterms(model: &str) -> bool {
-    // keyterm is a nova-3 feature on /v1; older models 400 on it. Flux takes it
-    // on /v2 regardless of variant.
+
+/// Whether the model takes decode-time `keyterm` bias. Custom words are only
+/// ever applied this way; older models 400 on the parameter, so they get none.
+fn model_accepts_keyterms(model: &str) -> bool {
+    // keyterm is a nova-3 feature on /v1. Flux takes it on /v2 regardless of
+    // variant.
     is_flux_model(model) || model.starts_with("nova-3")
 }
-
-/// Deepgram's conversational turn-based model. Streaming-only, and a different
-/// wire protocol from the `/v1/listen` models — see [`build_flux_ws_url`].
-///
-/// The multilingual variant is the default because Handy's own language setting
-/// defaults to "auto": `flux-general-multi` covers 10 languages (English among
-/// them) and auto-detects, whereas `flux-general-en` would silently force
-/// English on everyone. Users who only ever dictate English can switch to
-/// `flux-general-en` for a marginal accuracy gain.
-pub const DEEPGRAM_FLUX_MODEL: &str = "flux-general-multi";
 
 /// Flux speaks `/v2/listen` with `TurnInfo` frames; everything else speaks
 /// `/v1/listen` with `Results` frames. The model id is the only discriminator
@@ -45,10 +34,23 @@ fn is_flux_model(model: &str) -> bool {
     model.trim().starts_with("flux")
 }
 
+/// The configured model, or the default when the setting is blank.
+fn effective_model(req: &CloudSttRequest) -> &str {
+    match req.model.trim() {
+        "" => DEEPGRAM_DEFAULT_MODEL,
+        model => model,
+    }
+}
+
+const MISSING_KEY: &str =
+    "Deepgram API key is not set. Add it in Settings → Models → Cloud Transcription.";
+
 const DEEPGRAM_URL: &str = "https://api.deepgram.com/v1/listen";
 /// Handy hands us mono f32 at the whisper rate; Deepgram is told the same.
 const SAMPLE_RATE: u32 = crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const KEY_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+const DEEPGRAM_PROJECTS_URL: &str = "https://api.deepgram.com/v1/projects";
 /// Deepgram caps keyterm prompting; stay well under it rather than 400ing.
 const MAX_KEYTERMS: usize = 100;
 
@@ -61,8 +63,7 @@ pub struct CloudSttRequest {
     /// Deepgram's `multi`.
     pub language: String,
     /// Custom words, passed as `keyterm` so the model biases toward them at
-    /// decode time (nova-3 only). The local fuzzy correction pass still runs
-    /// afterwards, so this is bias, not a replacement.
+    /// decode time. They never rewrite the returned text.
     pub keyterms: Vec<String>,
 }
 
@@ -122,11 +123,7 @@ pub fn batch_model(model: &str) -> &str {
 }
 
 fn build_url(req: &CloudSttRequest) -> Result<String> {
-    let model = batch_model(if req.model.trim().is_empty() {
-        DEEPGRAM_DEFAULT_MODEL
-    } else {
-        req.model.trim()
-    });
+    let model = batch_model(effective_model(req));
 
     let mut url = reqwest::Url::parse(DEEPGRAM_URL)?;
     {
@@ -170,9 +167,7 @@ fn build_headers(api_key: &str) -> Result<HeaderMap> {
 
 pub async fn transcribe_deepgram(req: &CloudSttRequest, audio: &[f32]) -> Result<String> {
     if req.api_key.trim().is_empty() {
-        return Err(anyhow!(
-            "Deepgram API key is not set. Add it in Settings → Transcription."
-        ));
+        return Err(anyhow!(MISSING_KEY));
     }
 
     let url = build_url(req)?;
@@ -202,8 +197,8 @@ pub async fn transcribe_deepgram(req: &CloudSttRequest, audio: &[f32]) -> Result
         .map_err(|e| anyhow!("Failed to read Deepgram response: {}", e))?;
 
     if !status.is_success() {
-        // The key itself is never echoed back by Deepgram, so the body is safe
-        // to surface — it carries the actual reason (bad model, bad key, ...).
+        // Deepgram never echoes the key, so the body is safe to surface: it
+        // carries the actual reason (bad model, bad key, ...).
         return Err(anyhow!("Deepgram returned {}: {}", status, text.trim()));
     }
 
@@ -233,6 +228,35 @@ pub fn transcribe_deepgram_blocking(req: &CloudSttRequest, audio: &[f32]) -> Res
     .map_err(|_| anyhow!("Deepgram request thread panicked"))?
 }
 
+/// Check a Deepgram API key without sending audio. Listing the key's projects
+/// is free, works for the default Member role, and returns 401 for a bad key.
+pub async fn validate_deepgram_key(api_key: &str) -> Result<()> {
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err(anyhow!("Enter a Deepgram API key first."));
+    }
+    let response = reqwest::Client::builder()
+        .timeout(KEY_CHECK_TIMEOUT)
+        .build()?
+        .get(DEEPGRAM_PROJECTS_URL)
+        .header(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Token {}", api_key))
+                .map_err(|_| anyhow!("The API key contains invalid characters."))?,
+        )
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not reach Deepgram: {}", e))?;
+
+    match response.status().as_u16() {
+        200..=299 => Ok(()),
+        401 | 403 => Err(anyhow!(
+            "Deepgram rejected this key. Copy the secret again from the Deepgram console; it is shown only once."
+        )),
+        status => Err(anyhow!("Deepgram returned HTTP {} while checking the key.", status)),
+    }
+}
+
 /* ── Streaming (Deepgram live WebSocket) ─────────────────────────────────── */
 
 const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
@@ -243,6 +267,10 @@ const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Measured round-trip is ~1.5s; this is a generous ceiling that still leaves
 /// headroom under the caller's own 30s finalize timeout.
 const WS_FINALIZE_TIMEOUT: Duration = Duration::from_secs(12);
+/// Deepgram closes a socket that receives nothing for 10 seconds (NET-0001).
+/// A pre-warmed socket idles between dictations, so the session sends a
+/// keepalive whenever it has sent nothing for this long.
+const WS_KEEPALIVE_EVERY: Duration = Duration::from_secs(4);
 
 /// Messages pushed to the socket-owning task.
 enum WsCmd {
@@ -282,7 +310,6 @@ impl DeepgramLiveStream {
         !self.cmd_tx.is_closed()
     }
 
-
     /// Open the socket. Blocks until the handshake completes (or fails), so a
     /// returned stream is ready to accept audio.
     ///
@@ -294,17 +321,11 @@ impl DeepgramLiveStream {
         on_interim: impl Fn(&str, &str) + Send + 'static,
     ) -> Result<Self> {
         if req.api_key.trim().is_empty() {
-            return Err(anyhow!(
-                "Deepgram API key is not set. Add it in Settings → Transcription."
-            ));
+            return Err(anyhow!(MISSING_KEY));
         }
 
         let url = build_ws_url(req)?;
-        let flux = is_flux_model(if req.model.trim().is_empty() {
-            DEEPGRAM_DEFAULT_MODEL
-        } else {
-            req.model.trim()
-        });
+        let flux = is_flux_model(effective_model(req));
         let api_key = req.api_key.clone();
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WsCmd>();
         // Two hops: `ready` reports handshake success so `connect` can block,
@@ -326,13 +347,7 @@ impl DeepgramLiveStream {
                     }
                 };
                 rt.block_on(run_ws_session(
-                    url,
-                    api_key,
-                    flux,
-                    cmd_rx,
-                    ready_tx,
-                    result_tx,
-                    on_interim,
+                    url, api_key, flux, cmd_rx, ready_tx, result_tx, on_interim,
                 ));
             })
             .map_err(|e| anyhow!("Failed to spawn Deepgram stream thread: {}", e))?;
@@ -389,11 +404,7 @@ impl Drop for DeepgramLiveStream {
 }
 
 fn build_ws_url(req: &CloudSttRequest) -> Result<String> {
-    let model = if req.model.trim().is_empty() {
-        DEEPGRAM_DEFAULT_MODEL
-    } else {
-        req.model.trim()
-    };
+    let model = effective_model(req);
 
     if is_flux_model(model) {
         return build_flux_ws_url(req, model);
@@ -667,6 +678,11 @@ async fn run_ws_session(
     // there is still a tail for the server to transcribe.
     let mut pending_audio = false;
     let mut outcome: Option<Result<String>> = None;
+    // `/v1` documents a JSON KeepAlive message. Flux on `/v2` rejects it and
+    // stays open on native WebSocket pings instead.
+    let mut keepalive = tokio::time::interval(WS_KEEPALIVE_EVERY);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_sent = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -713,7 +729,8 @@ async fn run_ws_session(
                                     _ => {}
                                 }
                             }
-                            Err(e) => warn!("Unparseable Deepgram Flux frame: {} ({})", e, payload),
+                            // Frames carry transcript text; log the size only.
+                            Err(e) => warn!("Unparseable Deepgram Flux frame ({} bytes): {}", payload.len(), e),
                         }
                     }
                     Some(Ok(Message::Text(payload))) => {
@@ -741,7 +758,7 @@ async fn run_ws_session(
                                     }
                                 }
                             }
-                            Err(e) => warn!("Unparseable Deepgram frame: {} ({})", e, payload),
+                            Err(e) => warn!("Unparseable Deepgram frame ({} bytes): {}", payload.len(), e),
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -757,6 +774,7 @@ async fn run_ws_session(
                 match cmd {
                     Some(WsCmd::Audio(bytes)) => {
                         pending_audio = true;
+                        last_sent = tokio::time::Instant::now();
                         if let Err(e) = socket.send(Message::Binary(bytes.into())).await {
                             outcome = Some(Err(anyhow!("Failed to send audio to Deepgram: {}", e)));
                             break;
@@ -780,6 +798,21 @@ async fn run_ws_session(
                     None => break,
                 }
             }
+
+            _ = keepalive.tick(), if !closing => {
+                if last_sent.elapsed() >= WS_KEEPALIVE_EVERY {
+                    let message = if flux {
+                        Message::Ping(Default::default())
+                    } else {
+                        Message::Text(r#"{"type":"KeepAlive"}"#.to_string().into())
+                    };
+                    if let Err(e) = socket.send(message).await {
+                        outcome = Some(Err(anyhow!("Deepgram keepalive failed: {}", e)));
+                        break;
+                    }
+                    last_sent = tokio::time::Instant::now();
+                }
+            }
         }
     }
 
@@ -795,8 +828,13 @@ async fn run_ws_session(
 }
 
 fn parse_transcript(body: &str) -> Result<String> {
-    let parsed: DeepgramResponse = serde_json::from_str(body)
-        .map_err(|e| anyhow!("Could not parse Deepgram response: {} (body: {})", e, body))?;
+    let parsed: DeepgramResponse = serde_json::from_str(body).map_err(|e| {
+        anyhow!(
+            "Could not parse Deepgram response ({} bytes): {}",
+            body.len(),
+            e
+        )
+    })?;
 
     // An empty/silent recording is a successful response with an empty
     // transcript, not an error — mirror the local engine and return "".
@@ -851,23 +889,15 @@ mod tests {
     }
 
     #[test]
-    fn only_keyterm_capable_models_suppress_the_fuzzy_pass() {
-        // Both Flux variants and nova-3 take the terms at decode time, so the
-        // caller skips the local Soundex correction for them.
+    fn keyterms_go_only_to_models_that_accept_them() {
         assert!(model_accepts_keyterms("flux-general-multi"));
         assert!(model_accepts_keyterms("flux-general-en"));
         assert!(model_accepts_keyterms("nova-3"));
         assert!(model_accepts_keyterms("nova-3-general"));
-        // nova-2 and friends 400 on keyterm, so they never get one -- the fuzzy
-        // pass is the only thing applying custom words there and must stay on.
+        // nova-2 and friends 400 on keyterm.
         assert!(!model_accepts_keyterms("nova-2"));
         assert!(!model_accepts_keyterms("whisper-large"));
-    }
-
-    #[test]
-    fn flux_still_counts_as_prompted_after_the_batch_fallback() {
-        // Flux falls back to nova-3 off the socket, which also takes keyterms --
-        // so the fallback must not silently re-enable the fuzzy pass.
+        // Flux's batch fallback is nova-3, which still takes them.
         assert!(model_accepts_keyterms(batch_model("flux-general-multi")));
     }
 
@@ -879,14 +909,6 @@ mod tests {
         assert!(url.contains("numerals=true"), "url was {url}");
         // Still no /v1-only formatting params, which Flux rejects.
         assert!(!url.contains("smart_format"));
-    }
-
-    #[test]
-    fn the_default_flux_model_is_multilingual() {
-        // Handy's language setting defaults to "auto", so the default Flux model
-        // must not silently force English.
-        assert!(is_flux_model(DEEPGRAM_FLUX_MODEL));
-        assert!(DEEPGRAM_FLUX_MODEL.contains("multi"));
     }
 
     #[test]
@@ -1089,7 +1111,8 @@ mod tests {
 
     #[test]
     fn parses_transcript_out_of_response() {
-        let body = r#"{"results":{"channels":[{"alternatives":[{"transcript":" hello world "}]}]}}"#;
+        let body =
+            r#"{"results":{"channels":[{"alternatives":[{"transcript":" hello world "}]}]}}"#;
         assert_eq!(parse_transcript(body).unwrap(), "hello world");
     }
 

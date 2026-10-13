@@ -21,7 +21,7 @@ export const PasteDelay: React.FC<PasteDelayProps> = ({
   descriptionKey = "settings.debug.pasteDelay.description",
 }) => {
   const { t } = useTranslation();
-  const { settings, updateSetting } = useSettings();
+  const { settings, updateSetting, resetSetting, isUpdating } = useSettings();
 
   const handleDelayChange = (value: number) => {
     updateSetting(settingKey, value);
@@ -31,8 +31,10 @@ export const PasteDelay: React.FC<PasteDelayProps> = ({
     <Slider
       value={settings?.[settingKey] ?? 60}
       onChange={handleDelayChange}
+      onReset={() => resetSetting(settingKey)}
+      isResetting={isUpdating(settingKey)}
       min={10}
-      max={500}
+      max={5000}
       step={10}
       label={t(labelKey)}
       description={t(descriptionKey)}

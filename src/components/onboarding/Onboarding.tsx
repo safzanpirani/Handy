@@ -1,18 +1,24 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { ChevronDown } from "lucide-react";
-import type { ModelInfo } from "@/bindings";
+import { ChevronDown, Cloud, SkipForward } from "lucide-react";
+import { commands, type ModelInfo } from "@/bindings";
 import type { ModelCardStatus } from "./ModelCard";
 import ModelCard, { isLegacySource } from "./ModelCard";
 import HandyTextLogo from "../icons/HandyTextLogo";
 import { useModelStore } from "../../stores/modelStore";
+import { useSettingsStore } from "../../stores/settingsStore";
+import { DeepgramSetup } from "../cloud/DeepgramSetup";
 
 interface OnboardingProps {
   onModelSelected: () => void;
+  preview?: boolean;
 }
 
-const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
+const Onboarding: React.FC<OnboardingProps> = ({
+  onModelSelected,
+  preview = false,
+}) => {
   const { t } = useTranslation();
   const {
     models,
@@ -28,6 +34,8 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const hasStartedSelection = useRef(false);
+  const [mode, setMode] = useState<"models" | "cloud">("models");
+  const [finishing, setFinishing] = useState(false);
 
   const isBusy = selectedModelId !== null;
 
@@ -60,6 +68,11 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
 
   // Watch for the selected model to finish downloading + verifying + extracting
   useEffect(() => {
+    // Debug previews are inert: never switch the user's active model. Guarded
+    // here as well as in the handlers because this is where the backend call
+    // actually happens.
+    if (preview) return;
+
     if (!selectedModelId) {
       hasStartedSelection.current = false;
       return;
@@ -98,10 +111,13 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
     extractingModels,
     selectModel,
     onModelSelected,
+    preview,
     t,
   ]);
 
   const handleDownloadModel = async (modelId: string) => {
+    if (preview) return;
+
     setSelectedModelId(modelId);
 
     // Error toast is handled centrally by the model-download-failed event listener
@@ -113,6 +129,8 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
   };
 
   const handleCancelDownload = async (modelId: string) => {
+    if (preview) return;
+
     const success = await cancelDownload(modelId);
     if (success) {
       setSelectedModelId(null);
@@ -120,6 +138,8 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
   };
 
   const handleSelectExistingModel = (modelId: string) => {
+    if (preview) return;
+
     setSelectedModelId(modelId);
   };
 
@@ -143,8 +163,39 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
     return downloadStats[modelId]?.speed;
   };
 
+  /** Leave onboarding without a local model (cloud setup or "skip"). */
+  const finishWithoutModel = async () => {
+    if (preview) return;
+    setFinishing(true);
+    const result = await commands.finishOnboardingWithoutModel();
+    if (result.status === "error") {
+      toast.error(result.error);
+      setFinishing(false);
+      return;
+    }
+    await useSettingsStore.getState().refreshSettings();
+    onModelSelected();
+  };
+
+  if (mode === "cloud") {
+    return (
+      <div className="h-screen w-full flex flex-col p-6 gap-4 overflow-y-auto">
+        <div className="flex flex-col items-center gap-2 shrink-0">
+          <HandyTextLogo width={160} />
+        </div>
+        <div className="max-w-[560px] w-full mx-auto pb-6">
+          <DeepgramSetup
+            readOnly={preview}
+            onBack={() => setMode("models")}
+            onComplete={finishWithoutModel}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="h-screen w-screen flex flex-col p-6 gap-4 inset-0">
+    <div className="h-screen w-full flex flex-col p-6 gap-4">
       <div className="flex flex-col items-center gap-2 shrink-0">
         <HandyTextLogo width={200} />
         <p className="text-text/70 max-w-md font-medium mx-auto">
@@ -251,6 +302,39 @@ const Onboarding: React.FC<OnboardingProps> = ({ onModelSelected }) => {
                 ))}
             </div>
           )}
+
+          <div className="space-y-3 pt-4 border-t border-mid-gray/20">
+            <div className="text-left">
+              <h2 className="text-sm font-medium text-text/60">
+                {t("onboarding.noDownload.title")}
+              </h2>
+            </div>
+            <button
+              type="button"
+              disabled={isBusy || finishing}
+              onClick={() => setMode("cloud")}
+              className="w-full flex items-start gap-3 rounded-xl border border-mid-gray/30 px-4 py-3 text-start hover:bg-mid-gray/10 transition-colors disabled:opacity-50"
+            >
+              <Cloud className="w-5 h-5 mt-0.5 shrink-0 text-logo-primary" />
+              <span className="space-y-0.5">
+                <span className="block text-sm font-semibold">
+                  {t("onboarding.noDownload.cloud.title")}
+                </span>
+                <span className="block text-xs text-text/60">
+                  {t("onboarding.noDownload.cloud.description")}
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              disabled={isBusy || finishing}
+              onClick={finishWithoutModel}
+              className="flex items-center gap-1.5 mx-auto py-1 text-sm font-medium text-text/60 hover:text-text transition-colors disabled:opacity-50"
+            >
+              <SkipForward className="w-4 h-4" />
+              {t("onboarding.noDownload.skip")}
+            </button>
+          </div>
         </div>
       </div>
     </div>

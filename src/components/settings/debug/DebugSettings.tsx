@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { LogLevelSelector } from "./LogLevelSelector";
 import { LiveLogViewer } from "./LiveLogViewer";
 import { PasteDelay } from "./PasteDelay";
+import { HoldThreshold } from "./HoldThreshold";
+import { ReliablePasteToggle } from "./ReliablePaste";
 import { RecordingBuffer } from "./RecordingBuffer";
 import { SettingsGroup } from "../../ui/SettingsGroup";
 import { AlwaysOnMicrophone } from "../AlwaysOnMicrophone";
@@ -10,8 +12,19 @@ import { SoundPicker } from "../SoundPicker";
 import { ClamshellMicrophoneSelector } from "../ClamshellMicrophoneSelector";
 import { UpdateChecksToggle } from "../UpdateChecksToggle";
 import { WhatsNewPreview } from "./WhatsNewPreview";
+import { KeyboardDiagnostic } from "./KeyboardDiagnostic";
+import {
+  OnboardingPreview,
+  type OnboardingPreviewStep,
+} from "./OnboardingPreview";
 
-export const DebugSettings: React.FC = () => {
+interface DebugSettingsProps {
+  onPreviewOnboarding?: (step: OnboardingPreviewStep) => void;
+}
+
+export const DebugSettings: React.FC<DebugSettingsProps> = ({
+  onPreviewOnboarding,
+}) => {
   const { t } = useTranslation();
 
   return (
@@ -19,6 +32,13 @@ export const DebugSettings: React.FC = () => {
       <SettingsGroup title={t("settings.debug.title")}>
         <LogLevelSelector grouped={true} />
         <WhatsNewPreview descriptionMode="tooltip" grouped={true} />
+        {onPreviewOnboarding && (
+          <OnboardingPreview
+            onPreview={onPreviewOnboarding}
+            descriptionMode="tooltip"
+            grouped={true}
+          />
+        )}
         <UpdateChecksToggle descriptionMode="tooltip" grouped={true} />
         <SoundPicker
           label={t("settings.debug.soundTheme.label")}
@@ -32,9 +52,12 @@ export const DebugSettings: React.FC = () => {
           labelKey="settings.debug.pasteDelayAfter.title"
           descriptionKey="settings.debug.pasteDelayAfter.description"
         />
+        <ReliablePasteToggle descriptionMode="tooltip" grouped={true} />
+        <HoldThreshold descriptionMode="tooltip" grouped={true} />
         <RecordingBuffer descriptionMode="tooltip" grouped={true} />
         <AlwaysOnMicrophone descriptionMode="tooltip" grouped={true} />
         <ClamshellMicrophoneSelector descriptionMode="tooltip" grouped={true} />
+        <KeyboardDiagnostic />
         <LiveLogViewer descriptionMode="tooltip" grouped={true} />
       </SettingsGroup>
     </div>
