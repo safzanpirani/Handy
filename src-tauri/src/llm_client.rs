@@ -3,6 +3,20 @@ use log::debug;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, REFERER, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
+
+const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const ERROR_DETAIL_LIMIT: usize = 500;
+
+pub(crate) fn clip_error_detail(value: &str) -> String {
+    let value = value.trim();
+    if value.chars().count() <= ERROR_DETAIL_LIMIT {
+        return value.to_string();
+    }
+
+    let clipped: String = value.chars().take(ERROR_DETAIL_LIMIT).collect();
+    format!("{clipped}…")
+}
 
 #[derive(Debug, Serialize)]
 struct ChatMessage {
@@ -97,10 +111,15 @@ fn build_headers(provider: &PostProcessProvider, api_key: &str) -> Result<Header
 }
 
 /// Create an HTTP client with provider-specific headers
-fn create_client(provider: &PostProcessProvider, api_key: &str) -> Result<reqwest::Client, String> {
+fn create_client(
+    provider: &PostProcessProvider,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
     let headers = build_headers(provider, api_key)?;
     reqwest::Client::builder()
         .default_headers(headers)
+        .timeout(timeout)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
@@ -145,12 +164,38 @@ pub async fn send_chat_completion_with_schema(
     reasoning_effort: Option<String>,
     reasoning: Option<ReasoningConfig>,
 ) -> Result<Option<String>, String> {
+    send_chat_completion_with_schema_and_timeout(
+        provider,
+        api_key,
+        model,
+        user_content,
+        system_prompt,
+        json_schema,
+        reasoning_effort,
+        reasoning,
+        LLM_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_chat_completion_with_schema_and_timeout(
+    provider: &PostProcessProvider,
+    api_key: String,
+    model: &str,
+    user_content: String,
+    system_prompt: Option<String>,
+    json_schema: Option<Value>,
+    reasoning_effort: Option<String>,
+    reasoning: Option<ReasoningConfig>,
+    timeout: Duration,
+) -> Result<Option<String>, String> {
     let base_url = provider.base_url.trim_end_matches('/');
     let url = format!("{}/chat/completions", base_url);
 
     debug!("Sending chat completion request to: {}", url);
 
-    let client = create_client(provider, &api_key)?;
+    let client = create_client(provider, &api_key, timeout)?;
 
     // Build messages vector
     let mut messages = Vec::new();
@@ -192,7 +237,16 @@ pub async fn send_chat_completion_with_schema(
         .json(&request_body)
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!(
+                    "Post-processing request timed out after {} seconds",
+                    timeout.as_secs_f32()
+                )
+            } else {
+                format!("HTTP request failed: {}", e)
+            }
+        })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -202,7 +256,8 @@ pub async fn send_chat_completion_with_schema(
             .unwrap_or_else(|_| "Failed to read error response".to_string());
         return Err(format!(
             "API request failed with status {}: {}",
-            status, error_text
+            status,
+            clip_error_detail(&error_text)
         ));
     }
 
@@ -228,7 +283,7 @@ pub async fn fetch_models(
 
     debug!("Fetching models from: {}", url);
 
-    let client = create_client(provider, &api_key)?;
+    let client = create_client(&provider, &api_key, LLM_REQUEST_TIMEOUT)?;
 
     let response = client
         .get(&url)
@@ -275,4 +330,102 @@ pub async fn fetch_models(
     }
 
     Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        clip_error_detail, send_chat_completion_with_schema_and_timeout, PostProcessProvider,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    fn provider(base_url: String) -> PostProcessProvider {
+        PostProcessProvider {
+            id: "test".to_string(),
+            label: "Test".to_string(),
+            base_url,
+            allow_base_url_edit: true,
+            models_endpoint: None,
+            supports_structured_output: false,
+        }
+    }
+
+    fn serve_once(status: &str, body: String, delay: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            thread::sleep(delay);
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+        format!("http://{address}")
+    }
+
+    async fn send(base_url: String, timeout: Duration) -> Result<Option<String>, String> {
+        send_chat_completion_with_schema_and_timeout(
+            &provider(base_url),
+            String::new(),
+            "test-model",
+            "hello".to_string(),
+            None,
+            None,
+            None,
+            None,
+            timeout,
+        )
+        .await
+    }
+
+    #[test]
+    fn error_details_are_clipped_on_character_boundaries() {
+        let detail = "é".repeat(600);
+        let clipped = clip_error_detail(&detail);
+
+        assert_eq!(clipped.chars().count(), 501);
+        assert!(clipped.ends_with('…'));
+    }
+
+    #[test]
+    fn http_errors_include_status_and_clipped_provider_message() {
+        let body = "x".repeat(700);
+        let base_url = serve_once("429 Too Many Requests", body, Duration::ZERO);
+        let error =
+            tauri::async_runtime::block_on(send(base_url, Duration::from_secs(1))).unwrap_err();
+
+        assert!(error.contains("429 Too Many Requests"));
+        assert!(error.ends_with('…'));
+        assert!(error.len() < 600);
+    }
+
+    #[test]
+    fn empty_choices_return_no_content() {
+        let base_url = serve_once("200 OK", r#"{"choices":[]}"#.to_string(), Duration::ZERO);
+        let result =
+            tauri::async_runtime::block_on(send(base_url, Duration::from_secs(1))).unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn stalled_requests_time_out() {
+        let base_url = serve_once(
+            "200 OK",
+            r#"{"choices":[]}"#.to_string(),
+            Duration::from_millis(200),
+        );
+        let error =
+            tauri::async_runtime::block_on(send(base_url, Duration::from_millis(25))).unwrap_err();
+
+        assert!(error.contains("timed out"));
+    }
 }

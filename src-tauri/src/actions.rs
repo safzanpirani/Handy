@@ -57,6 +57,13 @@ struct TranscribeAction {
 /// Field name for structured output JSON schema
 const TRANSCRIPTION_FIELD: &str = "transcription";
 
+#[derive(Debug, PartialEq, Eq)]
+enum PostProcessResult {
+    Enhanced(String),
+    Unavailable(String),
+    Skipped,
+}
+
 /// Strip invisible Unicode characters that some LLMs may insert
 fn strip_invisible_chars(s: &str) -> String {
     s.replace(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'], "")
@@ -101,17 +108,21 @@ fn should_use_streaming_overlay(style: OverlayStyle, is_streaming: bool) -> bool
     style == OverlayStyle::Live && is_streaming
 }
 
-async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
+async fn post_process_transcription(
+    settings: &AppSettings,
+    transcription: &str,
+) -> PostProcessResult {
     if is_blank_transcription(transcription) {
         debug!("Post-processing skipped because the transcription is empty");
-        return None;
+        return PostProcessResult::Skipped;
     }
 
     let provider = match settings.active_post_process_provider().cloned() {
         Some(provider) => provider,
         None => {
-            debug!("Post-processing enabled but no provider is selected");
-            return None;
+            let reason = "No enhancement provider is selected".to_string();
+            debug!("{reason}");
+            return PostProcessResult::Unavailable(reason);
         }
     };
 
@@ -122,18 +133,17 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
         .unwrap_or_default();
 
     if model.trim().is_empty() {
-        debug!(
-            "Post-processing skipped because provider '{}' has no model configured",
-            provider.id
-        );
-        return None;
+        let reason = format!("No enhancement model is configured for {}", provider.label);
+        debug!("{reason}");
+        return PostProcessResult::Unavailable(reason);
     }
 
     let selected_prompt_id = match &settings.post_process_selected_prompt_id {
         Some(id) => id.clone(),
         None => {
-            debug!("Post-processing skipped because no prompt is selected");
-            return None;
+            let reason = "No enhancement prompt is selected".to_string();
+            debug!("{reason}");
+            return PostProcessResult::Unavailable(reason);
         }
     };
 
@@ -144,17 +154,16 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     {
         Some(prompt) => prompt.prompt.clone(),
         None => {
-            debug!(
-                "Post-processing skipped because prompt '{}' was not found",
-                selected_prompt_id
-            );
-            return None;
+            let reason = "The selected enhancement prompt no longer exists".to_string();
+            debug!("{reason}");
+            return PostProcessResult::Unavailable(reason);
         }
     };
 
     if prompt.trim().is_empty() {
-        debug!("Post-processing skipped because the selected prompt is empty");
-        return None;
+        let reason = "The selected enhancement prompt is empty".to_string();
+        debug!("{reason}");
+        return PostProcessResult::Unavailable(reason);
     }
 
     debug!(
@@ -199,10 +208,9 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             {
                 if !apple_intelligence::check_apple_intelligence_availability() {
-                    debug!(
-                        "Apple Intelligence selected but not currently available on this device"
-                    );
-                    return None;
+                    let reason = "Apple Intelligence is not available on this device".to_string();
+                    debug!("{reason}");
+                    return PostProcessResult::Unavailable(reason);
                 }
 
                 let token_limit = model.trim().parse::<i32>().unwrap_or(0);
@@ -213,28 +221,32 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                 ) {
                     Ok(result) => {
                         if result.trim().is_empty() {
-                            debug!("Apple Intelligence returned an empty response");
-                            None
+                            let reason =
+                                "Apple Intelligence returned an empty response".to_string();
+                            debug!("{reason}");
+                            PostProcessResult::Unavailable(reason)
                         } else {
                             let result = strip_invisible_chars(&result);
                             debug!(
                                 "Apple Intelligence post-processing succeeded. Output length: {} chars",
                                 result.len()
                             );
-                            Some(result)
+                            PostProcessResult::Enhanced(result)
                         }
                     }
                     Err(err) => {
-                        error!("Apple Intelligence post-processing failed: {}", err);
-                        None
+                        let reason = crate::llm_client::clip_error_detail(&err);
+                        error!("Apple Intelligence post-processing failed: {reason}");
+                        PostProcessResult::Unavailable(reason)
                     }
                 };
             }
 
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
             {
-                debug!("Apple Intelligence provider selected on unsupported platform");
-                return None;
+                let reason = "Apple Intelligence is not supported on this device".to_string();
+                debug!("{reason}");
+                return PostProcessResult::Unavailable(reason);
             }
         }
 
@@ -276,31 +288,31 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
                                 provider.id,
                                 result.len()
                             );
-                            return Some(result);
+                            return PostProcessResult::Enhanced(result);
                         } else {
-                            error!("Structured output response missing 'transcription' field");
-                            return Some(strip_invisible_chars(&content));
+                            warn!(
+                                "Structured output response missing 'transcription' field. Falling back to legacy mode."
+                            );
                         }
                     }
                     Err(e) => {
-                        error!(
-                            "Failed to parse structured output JSON: {}. Returning raw content.",
+                        warn!(
+                            "Failed to parse structured output JSON: {}. Falling back to legacy mode.",
                             e
                         );
-                        return Some(strip_invisible_chars(&content));
                     }
                 }
             }
             Ok(None) => {
-                error!("LLM API response has no content");
-                return None;
+                let reason = "The enhancement provider returned an empty response".to_string();
+                error!("{reason}");
+                return PostProcessResult::Unavailable(reason);
             }
             Err(e) => {
                 warn!(
                     "Structured output failed for provider '{}': {}. Falling back to legacy mode.",
                     provider.id, e
                 );
-                // Fall through to legacy mode below
             }
         }
     }
@@ -321,24 +333,30 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     {
         Ok(Some(content)) => {
             let content = strip_invisible_chars(&content);
+            if content.trim().is_empty() {
+                let reason = "The enhancement provider returned an empty response".to_string();
+                error!("{reason}");
+                return PostProcessResult::Unavailable(reason);
+            }
             debug!(
                 "LLM post-processing succeeded for provider '{}'. Output length: {} chars",
                 provider.id,
                 content.len()
             );
-            Some(content)
+            PostProcessResult::Enhanced(content)
         }
         Ok(None) => {
-            error!("LLM API response has no content");
-            None
+            let reason = "The enhancement provider returned an empty response".to_string();
+            error!("{reason}");
+            PostProcessResult::Unavailable(reason)
         }
         Err(e) => {
+            let reason = crate::llm_client::clip_error_detail(&e);
             error!(
                 "LLM post-processing failed for provider '{}': {}. Falling back to original transcription.",
-                provider.id,
-                e
+                provider.id, reason
             );
-            None
+            PostProcessResult::Unavailable(reason)
         }
     }
 }
@@ -395,6 +413,7 @@ pub(crate) struct ProcessedTranscription {
     pub final_text: String,
     pub post_processed_text: Option<String>,
     pub post_process_prompt: Option<String>,
+    pub post_process_error: Option<String>,
 }
 
 /// Resolve the persisted language *intent* into the language the currently-loaded
@@ -418,6 +437,26 @@ fn resolve_effective_language(app: &AppHandle, settings: &AppSettings) -> String
     }
 }
 
+fn apply_post_process_result(
+    result: PostProcessResult,
+    final_text: &mut String,
+    post_processed_text: &mut Option<String>,
+    post_process_error: &mut Option<String>,
+) -> bool {
+    match result {
+        PostProcessResult::Enhanced(processed_text) => {
+            *post_processed_text = Some(processed_text.clone());
+            *final_text = processed_text;
+            true
+        }
+        PostProcessResult::Unavailable(reason) => {
+            *post_process_error = Some(reason);
+            false
+        }
+        PostProcessResult::Skipped => false,
+    }
+}
+
 pub(crate) async fn process_transcription_output(
     app: &AppHandle,
     transcription: &str,
@@ -427,6 +466,7 @@ pub(crate) async fn process_transcription_output(
     let mut final_text = transcription.to_string();
     let mut post_processed_text: Option<String> = None;
     let mut post_process_prompt: Option<String> = None;
+    let mut post_process_error: Option<String> = None;
 
     // Resolve the language the transcription actually ran in (the persisted
     // intent coerced against the loaded model's capabilities) so OpenCC keys off
@@ -439,10 +479,13 @@ pub(crate) async fn process_transcription_output(
     }
 
     if post_process {
-        if let Some(processed_text) = post_process_transcription(&settings, &final_text).await {
-            post_processed_text = Some(processed_text.clone());
-            final_text = processed_text;
-
+        let enhanced = apply_post_process_result(
+            post_process_transcription(&settings, &final_text).await,
+            &mut final_text,
+            &mut post_processed_text,
+            &mut post_process_error,
+        );
+        if enhanced {
             if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
                 if let Some(prompt) = settings
                     .post_process_prompts
@@ -461,6 +504,7 @@ pub(crate) async fn process_transcription_output(
         final_text,
         post_processed_text,
         post_process_prompt,
+        post_process_error,
     }
 }
 
@@ -786,6 +830,10 @@ impl ShortcutAction for TranscribeAction {
                                 return;
                             }
 
+                            if let Some(reason) = &processed.post_process_error {
+                                let _ = ah.emit("post-process-error", reason.clone());
+                            }
+
                             // Save to history if WAV was saved
                             if wav_saved {
                                 if let Err(err) = hm.save_entry(
@@ -944,7 +992,10 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
 
 #[cfg(test)]
 mod tests {
-    use super::{complete_unless_cancelled, is_blank_transcription, should_use_streaming_overlay};
+    use super::{
+        apply_post_process_result, complete_unless_cancelled, is_blank_transcription,
+        should_use_streaming_overlay, PostProcessResult,
+    };
     use crate::settings::OverlayStyle;
     use std::future;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -999,5 +1050,43 @@ mod tests {
         assert!(!should_use_streaming_overlay(OverlayStyle::Live, false));
         assert!(!should_use_streaming_overlay(OverlayStyle::Minimal, true));
         assert!(!should_use_streaming_overlay(OverlayStyle::None, true));
+    }
+
+    #[test]
+    fn unavailable_post_processing_preserves_original_text() {
+        let mut final_text = "raw transcript".to_string();
+        let mut post_processed_text = None;
+        let mut post_process_error = None;
+
+        let enhanced = apply_post_process_result(
+            PostProcessResult::Unavailable("provider failed".to_string()),
+            &mut final_text,
+            &mut post_processed_text,
+            &mut post_process_error,
+        );
+
+        assert!(!enhanced);
+        assert_eq!(final_text, "raw transcript");
+        assert_eq!(post_processed_text, None);
+        assert_eq!(post_process_error.as_deref(), Some("provider failed"));
+    }
+
+    #[test]
+    fn successful_post_processing_replaces_original_text() {
+        let mut final_text = "raw transcript".to_string();
+        let mut post_processed_text = None;
+        let mut post_process_error = None;
+
+        let enhanced = apply_post_process_result(
+            PostProcessResult::Enhanced("clean transcript".to_string()),
+            &mut final_text,
+            &mut post_processed_text,
+            &mut post_process_error,
+        );
+
+        assert!(enhanced);
+        assert_eq!(final_text, "clean transcript");
+        assert_eq!(post_processed_text.as_deref(), Some("clean transcript"));
+        assert_eq!(post_process_error, None);
     }
 }

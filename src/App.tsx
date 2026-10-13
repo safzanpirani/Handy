@@ -151,6 +151,27 @@ function App() {
     };
   }, [t]);
 
+  // Listen for post-processing failures. The backend still inserts the original
+  // transcription, so the toast explains both the failure and the fallback.
+  useEffect(() => {
+    const unlisten = listen<string>("post-process-error", (event) => {
+      toast.error(
+        t("errors.enhancementFailedTitle", {
+          defaultValue: "Enhancement Failed",
+        }),
+        {
+          description: t("errors.enhancementFailed", {
+            reason: event.payload,
+            defaultValue: "{{reason}} Original transcription was inserted.",
+          }),
+        },
+      );
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [t]);
+
   // Listen for model loading failures and show a toast
   useEffect(() => {
     const unlisten = listen<ModelStateEvent>("model-state-changed", (event) => {
