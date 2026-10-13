@@ -20,10 +20,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: "macos-latest"
+          # --target puts the bundle under target/<triple>/, which is where the
+          # macOS artifact upload looks; without it no DMG was ever uploaded.
+          # macos-26 carries the SDK for Apple Intelligence, as in release.yml.
+          - platform: "macos-26"
             target: "aarch64-apple-darwin"
+            build-args: "--target aarch64-apple-darwin"
           - platform: "windows-latest"
             target: "x86_64-pc-windows-msvc"
+            build-args: ""
+          # AppImage runs on any x86_64 distro, including Arch/CachyOS.
+          - platform: "ubuntu-24.04"
+            target: "x86_64-unknown-linux-gnu"
+            build-args: "--bundles appimage"
     # Must match the reusable workflow's own `contents: write` — a called
     # workflow cannot be granted more than its caller holds, and anything less
     # fails the run at startup.
@@ -33,12 +42,12 @@ jobs:
     with:
       platform: ${{ matrix.platform }}
       target: ${{ matrix.target }}
-      build-args: ""
+      build-args: ${{ matrix.build-args }}
       upload-artifacts: true
       sign-binaries: false
     secrets: inherit
 
-  # Publishes the Windows installer to a rolling prerelease so it can be linked
+  # Publishes the installers to a rolling prerelease so they can be linked
   # to directly, instead of living in an artifact that expires in 30 days and
   # needs a GitHub login to download.
   release:
@@ -62,7 +71,7 @@ jobs:
           mkdir -p release
           # -print -quit keeps this failing loudly if the bundle layout moves,
           # rather than publishing an empty release.
-          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' \) \
+          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.AppImage' \) \
             -exec cp {} release/ \;
           if [ -z "$(ls -A release)" ]; then
             echo "No installers found in artifacts:" >&2
@@ -84,7 +93,8 @@ jobs:
             --title "Flux build (rolling)" \
             --notes "Automatic build of \`feat/deepgram-flux\` at ${GITHUB_SHA:0:7}.
 
-          Unsigned, so Windows SmartScreen will warn: **More info -> Run anyway**.
+          Unsigned. Windows SmartScreen warns: **More info -> Run anyway**. macOS blocks the
+          first launch: right-click -> Open. Linux: \`chmod +x\` the AppImage and run it.
 
           Rebuilt on every push to the branch; the download link stays the same." \
             --prerelease \
