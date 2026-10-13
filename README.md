@@ -24,13 +24,29 @@ Handy isn't trying to be the best speech-to-text app—it's trying to be the mos
 3. **Release** and Handy processes your speech using Whisper
 4. **Get** your transcribed text pasted directly into whatever app you're using
 
-The process is entirely local:
+The default process is entirely local:
 
 - Silence is filtered using VAD (Voice Activity Detection) with Silero
 - Transcription uses your choice of models:
   - **Whisper models** (Small/Medium/Turbo/Large) with GPU acceleration when available
   - **Parakeet V3** - CPU-optimized model with excellent performance and automatic language detection
 - Works on Windows, macOS, and Linux
+
+### Cloud transcription in this fork
+
+This fork also supports Deepgram streaming transcription. Enable cloud transcription in Settings,
+enter a Deepgram API key, and select `flux-general-multi` for Flux dictation. Handy pre-warms the
+WebSocket at startup and after each dictation, then finishes the transcript on Flux `EndOfTurn` after
+key release.
+
+Handy applies Silero VAD before cloud streaming when **Settings → Advanced → Voice Activity
+Detection** is enabled. Disable that setting to send continuous resampled microphone audio to Flux
+and let Deepgram handle speech detection and endpointing.
+
+Post-processing requests have a 15-second timeout. If the enhancement provider fails, returns no
+content, or has incomplete configuration, Handy inserts the original transcript and displays the
+failure reason. Provider response details are clipped before display. Malformed structured output
+falls back to the legacy prompt path instead of being pasted as raw JSON.
 
 ## Quick Start
 

@@ -422,7 +422,7 @@ pub struct AppSettings {
     #[serde(default)]
     pub post_process_selected_prompt_id: Option<String>,
     /// When enabled, audio is transcribed by a hosted STT API instead of the
-    /// local engine. Off by default unless a key was baked in at build time.
+    /// local engine. Users supply provider credentials in Settings.
     #[serde(default = "default_cloud_stt_enabled")]
     pub cloud_stt_enabled: bool,
     #[serde(default = "default_cloud_stt_provider_id")]
@@ -688,18 +688,6 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
     providers
 }
 
-/// A Deepgram key may be baked in at build time via the HANDY_DEEPGRAM_API_KEY
-/// environment variable, so a build handed to someone else works with no setup.
-/// Unset in normal builds, in which case the user supplies the key in Settings.
-///
-/// Prefer passing this from a CI secret rather than committing a literal: the
-/// value is readable in the shipped binary either way, but a key in source is
-/// also a key in every clone and fork of the repo.
-pub const BAKED_DEEPGRAM_API_KEY: &str = match option_env!("HANDY_DEEPGRAM_API_KEY") {
-    Some(key) => key,
-    None => "",
-};
-
 /// Cloud STT providers we know how to talk to. Kept as a list (rather than a
 /// bare Deepgram constant) so adding a second backend is a one-line change
 /// here plus a branch in `stt_cloud`.
@@ -714,20 +702,13 @@ fn default_cloud_stt_provider_id() -> String {
 fn default_cloud_stt_api_keys() -> SecretMap {
     let mut map = HashMap::new();
     for id in cloud_stt_provider_ids() {
-        let key = if id == crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
-            BAKED_DEEPGRAM_API_KEY.to_string()
-        } else {
-            String::new()
-        };
-        map.insert(id, key);
+        map.insert(id, String::new());
     }
     SecretMap(map)
 }
 
-/// A build carrying a baked-in key is meant to work out of the box, so cloud
-/// transcription starts on. Without one, Handy stays local by default.
 fn default_cloud_stt_enabled() -> bool {
-    !BAKED_DEEPGRAM_API_KEY.is_empty()
+    false
 }
 
 fn default_cloud_stt_models() -> HashMap<String, String> {
@@ -1422,6 +1403,45 @@ mod tests {
         assert_eq!(
             settings.settings_schema_version,
             CURRENT_SETTINGS_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn default_settings_require_user_supplied_cloud_credentials() {
+        let settings = get_default_settings();
+
+        assert!(!settings.cloud_stt_enabled);
+        assert_eq!(
+            settings
+                .cloud_stt_api_keys
+                .get(crate::stt_cloud::DEEPGRAM_PROVIDER_ID)
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            settings.post_process_api_keys.get("groq").map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn stored_provider_credentials_survive_deserialization() {
+        let settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "cloud_stt_api_keys": { "deepgram": "saved-deepgram-key" },
+            "post_process_api_keys": { "groq": "saved-groq-key" }
+        }))
+        .expect("stored provider credentials should parse");
+
+        assert_eq!(
+            settings
+                .cloud_stt_api_keys
+                .get(crate::stt_cloud::DEEPGRAM_PROVIDER_ID)
+                .map(String::as_str),
+            Some("saved-deepgram-key")
+        );
+        assert_eq!(
+            settings.post_process_api_keys.get("groq").map(String::as_str),
+            Some("saved-groq-key")
         );
     }
 
