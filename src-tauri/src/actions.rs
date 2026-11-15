@@ -621,9 +621,15 @@ impl ShortcutAction for TranscribeAction {
             streaming: model_supports_streaming,
             long_form: false,
         };
-        if settings.cloud_stt_enabled
-            || live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None
-        {
+        // With cloud on, only a streaming provider gets a worker (the cloud
+        // worker); a custom endpoint transcribes the whole recording at
+        // release. The local engine's live decode applies only with cloud off.
+        let start_worker = if settings.cloud_stt_enabled {
+            use_live_stream
+        } else {
+            live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None
+        };
+        if start_worker {
             tm.start_stream();
         }
         let plan_elapsed = plan_started.elapsed();

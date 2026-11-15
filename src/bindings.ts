@@ -1191,9 +1191,10 @@ spoken_languages?: string[]; overlay_position?: OverlayPosition; debug_mode?: bo
  */
 cloud_stt_enabled?: boolean; cloud_stt_provider_id?: string; cloud_stt_api_keys?: SecretMap; cloud_stt_models?: Partial<{ [key in string]: string }>; 
 /**
- * Endpoint per provider; only the custom provider reads it.
+ * Endpoint per provider; only the custom provider reads it. A
+ * [`SecretMap`] because self-hosted URLs can carry credentials.
  */
-cloud_stt_base_urls?: Partial<{ [key in string]: string }>; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; 
+cloud_stt_base_urls?: SecretMap; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; 
 /**
  * Experimental, macOS only: move a Bluetooth headset (AirPods) to this
  * Mac while recording, so its microphone does not return silence while

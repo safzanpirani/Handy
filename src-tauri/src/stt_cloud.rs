@@ -304,8 +304,17 @@ fn custom_transcription_url(base_url: &str) -> Result<reqwest::Url> {
     } else {
         format!("{base}/audio/transcriptions")
     };
-    reqwest::Url::parse(&full)
-        .map_err(|e| anyhow!("Custom transcription URL '{}' is invalid: {}", base, e))
+    reqwest::Url::parse(&full).map_err(|e| anyhow!("Custom transcription URL is invalid: {}", e))
+}
+
+/// The endpoint as it may appear in logs and errors: no userinfo or query,
+/// which is where self-hosted servers put credentials.
+fn redacted_url(url: &reqwest::Url) -> String {
+    let mut shown = url.clone();
+    let _ = shown.set_username("");
+    let _ = shown.set_password(None);
+    shown.set_query(None);
+    shown.to_string()
 }
 
 /// Mono 16-bit PCM WAV at Handy's sample rate: the one upload format every
@@ -371,7 +380,7 @@ async fn transcribe_custom(req: &CloudSttRequest, audio: &[f32]) -> Result<Strin
     }
     debug!(
         "Custom STT request to {}: {:.2}s of audio",
-        url,
+        redacted_url(&url),
         audio.len() as f32 / SAMPLE_RATE as f32
     );
 
@@ -384,10 +393,13 @@ async fn transcribe_custom(req: &CloudSttRequest, audio: &[f32]) -> Result<Strin
     if !api_key.is_empty() {
         request = request.bearer_auth(api_key);
     }
-    let response = request
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not reach the custom endpoint {}: {}", url, e))?;
+    let response = request.send().await.map_err(|e| {
+        anyhow!(
+            "Could not reach the custom endpoint {}: {}",
+            redacted_url(&url),
+            e.without_url()
+        )
+    })?;
 
     let status = response.status();
     let text = response
@@ -475,6 +487,14 @@ impl DeepgramLiveStream {
         req: &CloudSttRequest,
         on_interim: impl Fn(&str, &str) + Send + 'static,
     ) -> Result<Self> {
+        // Only Deepgram has a live socket; never send another provider's key
+        // there.
+        if req.provider_id != DEEPGRAM_PROVIDER_ID {
+            return Err(anyhow!(
+                "Provider '{}' does not stream; transcribing in one request instead",
+                req.provider_id
+            ));
+        }
         if req.api_key.trim().is_empty() {
             return Err(anyhow!(MISSING_KEY));
         }
@@ -1052,6 +1072,30 @@ mod tests {
             "Hello there."
         );
         assert!(parse_custom_transcript("<html>502</html>").is_err());
+    }
+
+    #[test]
+    fn deepgram_socket_refuses_other_providers_keys() {
+        let custom = CloudSttRequest {
+            provider_id: CUSTOM_PROVIDER_ID.to_string(),
+            api_key: "custom-server-key".to_string(),
+            ..req()
+        };
+        let err = DeepgramLiveStream::connect(&custom, |_, _| {})
+            .err()
+            .expect("a custom provider must never open a Deepgram socket");
+        assert!(err.to_string().contains("does not stream"), "{err}");
+    }
+
+    #[test]
+    fn logged_endpoint_hides_credentials() {
+        let url =
+            reqwest::Url::parse("https://user:pw@stt.example/v1/audio/transcriptions?key=abc")
+                .unwrap();
+        assert_eq!(
+            redacted_url(&url),
+            "https://stt.example/v1/audio/transcriptions"
+        );
     }
 
     #[test]

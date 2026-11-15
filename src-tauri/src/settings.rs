@@ -505,9 +505,10 @@ pub struct AppSettings {
     pub cloud_stt_api_keys: SecretMap,
     #[serde(default = "default_cloud_stt_models")]
     pub cloud_stt_models: HashMap<String, String>,
-    /// Endpoint per provider; only the custom provider reads it.
+    /// Endpoint per provider; only the custom provider reads it. A
+    /// [`SecretMap`] because self-hosted URLs can carry credentials.
     #[serde(default = "default_cloud_stt_base_urls")]
-    pub cloud_stt_base_urls: HashMap<String, String>,
+    pub cloud_stt_base_urls: SecretMap,
     #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
@@ -844,11 +845,11 @@ fn cloud_stt_provider_ids() -> Vec<String> {
     ]
 }
 
-fn default_cloud_stt_base_urls() -> HashMap<String, String> {
-    HashMap::from([(
+fn default_cloud_stt_base_urls() -> SecretMap {
+    SecretMap(HashMap::from([(
         crate::stt_cloud::CUSTOM_PROVIDER_ID.to_string(),
         String::new(),
-    )])
+    )]))
 }
 
 fn default_cloud_stt_provider_id() -> String {
