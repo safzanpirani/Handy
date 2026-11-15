@@ -62,7 +62,7 @@
     "permissions": {
       "microphone": {
         "name": "Microphone",
-        "why": "So Handy can hear you. Audio is turned into text on this computer and never uploaded."
+        "why": "So Handy can hear you. Local models turn audio into text on this computer; cloud transcription sends it to the service you choose."
       },
       "accessibility": {
         "name": "Accessibility",
