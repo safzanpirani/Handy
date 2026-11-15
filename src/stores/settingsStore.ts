@@ -215,6 +215,8 @@ const settingUpdaters: {
     commands.changeCloudSttEnabledSetting(value as boolean),
   cloud_stt_provider_id: (value) =>
     commands.changeCloudSttProviderSetting(value as string),
+  cloud_stt_custom_preview: (value) =>
+    commands.changeCloudSttCustomPreviewSetting(value as boolean),
   cloud_stt_base_urls: (value) =>
     Promise.all(
       Object.entries(value ?? {}).map(([providerId, baseUrl]) =>

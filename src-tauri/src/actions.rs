@@ -607,6 +607,12 @@ impl ShortcutAction for TranscribeAction {
         } else {
             model_supports_streaming
         };
+        // A custom endpoint can still preview the audio so far while recording.
+        // It keeps the offline VAD profile: its transcript is the same batch
+        // request as without previews.
+        let cloud_preview = settings.cloud_stt_enabled
+            && settings.cloud_stt_provider_id == crate::stt_cloud::CUSTOM_PROVIDER_ID
+            && settings.cloud_stt_custom_preview;
         let vad_policy = if !settings.vad_enabled {
             VadPolicy::Disabled
         } else if use_live_stream {
@@ -621,11 +627,12 @@ impl ShortcutAction for TranscribeAction {
             streaming: model_supports_streaming,
             long_form: false,
         };
-        // With cloud on, only a streaming provider gets a worker (the cloud
-        // worker); a custom endpoint transcribes the whole recording at
-        // release. The local engine's live decode applies only with cloud off.
+        // With cloud on, Deepgram gets the streaming worker and a custom
+        // endpoint the preview worker when previews are on; otherwise it
+        // transcribes the whole recording at release. The local engine's live
+        // decode applies only with cloud off.
         let start_worker = if settings.cloud_stt_enabled {
-            use_live_stream
+            use_live_stream || cloud_preview
         } else {
             live_decode(expected_model, settings.long_form_chunking) != LiveDecode::None
         };
@@ -634,12 +641,15 @@ impl ShortcutAction for TranscribeAction {
         }
         let plan_elapsed = plan_started.elapsed();
 
-        // Sizing the overlay follows the same advertised capability. A model that
-        // doesn't stream (or whose capability is not known yet) gets the compact
-        // pill instead of an oversized transparent live window.
+        // Sizing the overlay follows the same advertised capability, or a
+        // custom endpoint's previews. A model that doesn't stream (or whose
+        // capability is not known yet) gets the compact pill instead of an
+        // oversized transparent live window.
         let overlay_started = Instant::now();
         match settings.overlay_style {
-            OverlayStyle::Live if use_live_stream => utils::show_streaming_overlay(app),
+            OverlayStyle::Live if use_live_stream || cloud_preview => {
+                utils::show_streaming_overlay(app)
+            }
             OverlayStyle::Live | OverlayStyle::Minimal => show_recording_overlay(app),
             OverlayStyle::None => {} // show_overlay_state no-ops on None anyway
         }

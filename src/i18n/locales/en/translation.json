@@ -911,7 +911,7 @@
       },
       "provider": {
         "title": "Service",
-        "description": "Deepgram streams as you speak and shows a live preview. A custom endpoint is any server with an OpenAI-compatible /audio/transcriptions API, such as a self-hosted model; it transcribes once you stop recording.",
+        "description": "Deepgram streams as you speak and shows a live preview. A custom endpoint is any server with an OpenAI-compatible /audio/transcriptions API, such as a self-hosted model; it transcribes the whole recording once you stop, and can preview it while you speak.",
         "deepgram": {
           "label": "Deepgram",
           "hint": "Streaming, live preview"
@@ -935,6 +935,10 @@
       "customModel": {
         "description": "Sent as the model field. Leave blank to use the server's default.",
         "placeholder": "Server default"
+      },
+      "customPreview": {
+        "label": "Live preview",
+        "description": "While you speak, send the audio so far to your server every 0.7 seconds and show what it hears. Each preview is a full request, so this adds load on the server. The final text still comes from one request once you stop."
       },
       "apiKey": {
         "title": "Deepgram API key",

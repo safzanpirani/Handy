@@ -36,6 +36,7 @@ use tauri_specta::Event;
 use transcribe_cpp::{Backend, RunOptions, Task, Transcript};
 
 mod chunked;
+mod cloud_preview;
 mod job;
 mod live;
 pub mod policy;
@@ -860,15 +861,15 @@ impl TranscriptionManager {
         self.stream_active.store(false, Ordering::Release);
 
         let manager = self.clone();
-        // Cloud streaming shares the router/finalize handshake but drives a
-        // Deepgram socket instead of the local engine.
-        let cloud = get_settings(&self.app_handle).cloud_stt_enabled;
-        thread::spawn(move || {
-            if cloud {
-                manager.run_cloud_stream_worker(rx, cancelled, worker_id)
-            } else {
-                manager.run_stream_worker(rx, cancelled, worker_id)
-            }
+        // Cloud shares the router/finalize handshake: Deepgram streams over its
+        // socket; the custom endpoint gets previews of the audio so far.
+        let settings = get_settings(&self.app_handle);
+        let cloud = settings.cloud_stt_enabled;
+        let cloud_streams = crate::stt_cloud::provider_streams(&settings.cloud_stt_provider_id);
+        thread::spawn(move || match (cloud, cloud_streams) {
+            (true, true) => manager.run_cloud_stream_worker(rx, cancelled, worker_id),
+            (true, false) => manager.run_cloud_preview_worker(rx, cancelled, worker_id),
+            (false, _) => manager.run_stream_worker(rx, cancelled, worker_id),
         });
     }
 

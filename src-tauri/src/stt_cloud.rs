@@ -21,7 +21,8 @@ pub const DEEPGRAM_PROVIDER_ID: &str = "deepgram";
 pub const CUSTOM_PROVIDER_ID: &str = "custom";
 
 /// Whether the provider takes the live-streaming path. Custom endpoints are
-/// batch only: the recording is sent once at key release.
+/// batch only: the recording is sent once at key release (previews while
+/// recording re-send the audio so far; see `cloud_preview`).
 pub fn provider_streams(provider_id: &str) -> bool {
     provider_id == DEEPGRAM_PROVIDER_ID
 }

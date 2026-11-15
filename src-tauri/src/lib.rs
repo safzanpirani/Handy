@@ -748,6 +748,7 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_cloud_stt_base_url_setting,
             shortcut::change_cloud_stt_api_key_setting,
             shortcut::change_cloud_stt_model_setting,
+            shortcut::change_cloud_stt_custom_preview_setting,
             shortcut::test_cloud_stt_api_key,
             shortcut::change_filler_word_removal_enabled_setting,
             shortcut::change_chinese_script_setting,

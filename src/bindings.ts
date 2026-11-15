@@ -447,6 +447,14 @@ async changeCloudSttModelSetting(providerId: string, model: string) : Promise<Re
     else return { status: "error", error: e  as any };
 }
 },
+async changeCloudSttCustomPreviewSetting(enabled: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_cloud_stt_custom_preview_setting", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Check provider credentials. Deepgram's key is checked without audio; a
  * custom endpoint gets half a second of silence using the saved URL and model
@@ -1194,7 +1202,13 @@ cloud_stt_enabled?: boolean; cloud_stt_provider_id?: string; cloud_stt_api_keys?
  * Endpoint per provider; only the custom provider reads it. A
  * [`SecretMap`] because self-hosted URLs can carry credentials.
  */
-cloud_stt_base_urls?: SecretMap; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; 
+cloud_stt_base_urls?: SecretMap; 
+/**
+ * Preview a custom endpoint's transcript while recording by sending the
+ * audio so far at an interval. The transcript itself is still one request
+ * at key release.
+ */
+cloud_stt_custom_preview?: boolean; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; 
 /**
  * Experimental, macOS only: move a Bluetooth headset (AirPods) to this
  * Mac while recording, so its microphone does not return silence while

@@ -509,6 +509,11 @@ pub struct AppSettings {
     /// [`SecretMap`] because self-hosted URLs can carry credentials.
     #[serde(default = "default_cloud_stt_base_urls")]
     pub cloud_stt_base_urls: SecretMap,
+    /// Preview a custom endpoint's transcript while recording by sending the
+    /// audio so far at an interval. The transcript itself is still one request
+    /// at key release.
+    #[serde(default = "default_cloud_stt_custom_preview")]
+    pub cloud_stt_custom_preview: bool,
     #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
@@ -868,6 +873,10 @@ fn default_cloud_stt_enabled() -> bool {
     false
 }
 
+fn default_cloud_stt_custom_preview() -> bool {
+    true
+}
+
 fn default_cloud_stt_models() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for id in cloud_stt_provider_ids() {
@@ -1110,6 +1119,7 @@ pub fn get_default_settings() -> AppSettings {
         cloud_stt_api_keys: default_cloud_stt_api_keys(),
         cloud_stt_models: default_cloud_stt_models(),
         cloud_stt_base_urls: default_cloud_stt_base_urls(),
+        cloud_stt_custom_preview: default_cloud_stt_custom_preview(),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),

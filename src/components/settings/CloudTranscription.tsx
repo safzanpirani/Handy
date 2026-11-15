@@ -54,7 +54,7 @@ const BlurTextField: React.FC<{
  * Cloud speech-to-text. When enabled, audio goes to a hosted STT API instead
  * of the local engine: Deepgram (streams, custom words become keyterms), or a
  * custom OpenAI-compatible endpoint such as a self-hosted model server
- * (transcribes once at key release).
+ * (transcribes once at key release, optionally previewing while recording).
  */
 export const CloudTranscription: React.FC = React.memo(() => {
   const { t } = useTranslation();
@@ -65,6 +65,7 @@ export const CloudTranscription: React.FC = React.memo(() => {
   const apiKeys = getSetting("cloud_stt_api_keys") || {};
   const models = getSetting("cloud_stt_models") || {};
   const baseUrls = getSetting("cloud_stt_base_urls") || {};
+  const customPreview = getSetting("cloud_stt_custom_preview") ?? true;
   const isCustom = provider === CUSTOM;
 
   const keyCheck = useCloudKeyCheck(provider);
@@ -268,6 +269,22 @@ export const CloudTranscription: React.FC = React.memo(() => {
               />
             )}
           </SettingContainer>
+
+          {isCustom && (
+            <ToggleSwitch
+              checked={customPreview}
+              onChange={(next) =>
+                updateSetting("cloud_stt_custom_preview", next)
+              }
+              isUpdating={isUpdating("cloud_stt_custom_preview")}
+              label={t("settings.cloudTranscription.customPreview.label")}
+              description={t(
+                "settings.cloudTranscription.customPreview.description",
+              )}
+              descriptionMode="tooltip"
+              grouped={true}
+            />
+          )}
         </>
       )}
     </SettingsGroup>
