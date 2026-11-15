@@ -505,6 +505,9 @@ pub struct AppSettings {
     pub cloud_stt_api_keys: SecretMap,
     #[serde(default = "default_cloud_stt_models")]
     pub cloud_stt_models: HashMap<String, String>,
+    /// Endpoint per provider; only the custom provider reads it.
+    #[serde(default = "default_cloud_stt_base_urls")]
+    pub cloud_stt_base_urls: HashMap<String, String>,
     #[serde(default)]
     pub mute_while_recording: bool,
     #[serde(default)]
@@ -832,11 +835,20 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
     providers
 }
 
-/// Cloud STT providers we know how to talk to. Kept as a list (rather than a
-/// bare Deepgram constant) so adding a second backend is a one-line change
-/// here plus a branch in `stt_cloud`.
+/// Cloud STT providers we know how to talk to: Deepgram, and a custom
+/// OpenAI-compatible endpoint for self-hosted models.
 fn cloud_stt_provider_ids() -> Vec<String> {
-    vec![crate::stt_cloud::DEEPGRAM_PROVIDER_ID.to_string()]
+    vec![
+        crate::stt_cloud::DEEPGRAM_PROVIDER_ID.to_string(),
+        crate::stt_cloud::CUSTOM_PROVIDER_ID.to_string(),
+    ]
+}
+
+fn default_cloud_stt_base_urls() -> HashMap<String, String> {
+    HashMap::from([(
+        crate::stt_cloud::CUSTOM_PROVIDER_ID.to_string(),
+        String::new(),
+    )])
 }
 
 fn default_cloud_stt_provider_id() -> String {
@@ -1096,6 +1108,7 @@ pub fn get_default_settings() -> AppSettings {
         cloud_stt_provider_id: default_cloud_stt_provider_id(),
         cloud_stt_api_keys: default_cloud_stt_api_keys(),
         cloud_stt_models: default_cloud_stt_models(),
+        cloud_stt_base_urls: default_cloud_stt_base_urls(),
         mute_while_recording: false,
         append_trailing_space: false,
         app_language: default_app_language(),

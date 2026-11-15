@@ -599,10 +599,14 @@ impl ShortcutAction for TranscribeAction {
             .as_ref()
             .map(|m| m.supports_streaming)
             .unwrap_or(false);
-        // Cloud transcription streams over a provider socket instead of a local
-        // engine, so it takes the live path regardless of the selected model —
-        // there may not even be one downloaded.
-        let use_live_stream = settings.cloud_stt_enabled || model_supports_streaming;
+        // Cloud transcription replaces the local engine, so the provider (not
+        // the selected model) decides: Deepgram streams over its socket; a
+        // custom endpoint is batch-only and transcribes at key release.
+        let use_live_stream = if settings.cloud_stt_enabled {
+            crate::stt_cloud::provider_streams(&settings.cloud_stt_provider_id)
+        } else {
+            model_supports_streaming
+        };
         let vad_policy = if !settings.vad_enabled {
             VadPolicy::Disabled
         } else if use_live_stream {

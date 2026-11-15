@@ -744,6 +744,8 @@ pub fn run(cli_args: CliArgs) {
             shortcut::change_long_form_chunking_setting,
             shortcut::change_vad_backend_setting,
             shortcut::change_cloud_stt_enabled_setting,
+            shortcut::change_cloud_stt_provider_setting,
+            shortcut::change_cloud_stt_base_url_setting,
             shortcut::change_cloud_stt_api_key_setting,
             shortcut::change_cloud_stt_model_setting,
             shortcut::test_cloud_stt_api_key,

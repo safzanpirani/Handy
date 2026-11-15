@@ -213,6 +213,14 @@ const settingUpdaters: {
     commands.changeExtraRecordingBufferSetting(value as number),
   cloud_stt_enabled: (value) =>
     commands.changeCloudSttEnabledSetting(value as boolean),
+  cloud_stt_provider_id: (value) =>
+    commands.changeCloudSttProviderSetting(value as string),
+  cloud_stt_base_urls: (value) =>
+    Promise.all(
+      Object.entries(value ?? {}).map(([providerId, baseUrl]) =>
+        commands.changeCloudSttBaseUrlSetting(providerId, baseUrl ?? ""),
+      ),
+    ),
   cloud_stt_api_keys: (value) =>
     Promise.all(
       Object.entries(value ?? {}).map(([providerId, apiKey]) =>

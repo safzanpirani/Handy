@@ -27,13 +27,16 @@ export type KeyCheckState =
   | { status: "valid" }
   | { status: "invalid"; message: string };
 
-/** Check a key against Deepgram without sending audio. */
-export const useDeepgramKeyCheck = () => {
+/**
+ * Check provider credentials: a Deepgram key is checked without audio; a
+ * custom endpoint gets half a second of silence at its saved URL and model.
+ */
+export const useCloudKeyCheck = (providerId: string = DEEPGRAM) => {
   const [state, setState] = useState<KeyCheckState>({ status: "idle" });
 
   const check = async (apiKey: string): Promise<boolean> => {
     setState({ status: "checking" });
-    const result = await commands.testCloudSttApiKey(DEEPGRAM, apiKey.trim());
+    const result = await commands.testCloudSttApiKey(providerId, apiKey.trim());
     if (result.status === "ok") {
       setState({ status: "valid" });
       return true;
@@ -196,7 +199,7 @@ export const DeepgramSetup: React.FC<DeepgramSetupProps> = ({
   const [model, setModel] = useState(DEEPGRAM_DEFAULT_MODEL);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const keyCheck = useDeepgramKeyCheck();
+  const keyCheck = useCloudKeyCheck();
 
   const finish = async () => {
     if (readOnly) return;

@@ -415,6 +415,22 @@ async changeCloudSttEnabledSetting(enabled: boolean) : Promise<Result<null, stri
     else return { status: "error", error: e  as any };
 }
 },
+async changeCloudSttProviderSetting(providerId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_cloud_stt_provider_setting", { providerId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeCloudSttBaseUrlSetting(providerId: string, baseUrl: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_cloud_stt_base_url_setting", { providerId, baseUrl }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeCloudSttApiKeySetting(providerId: string, apiKey: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_cloud_stt_api_key_setting", { providerId, apiKey }) };
@@ -432,7 +448,9 @@ async changeCloudSttModelSetting(providerId: string, model: string) : Promise<Re
 }
 },
 /**
- * Check an API key against the provider without sending audio.
+ * Check provider credentials. Deepgram's key is checked without audio; a
+ * custom endpoint gets half a second of silence using the saved URL and model
+ * with the key being tested.
  */
 async testCloudSttApiKey(providerId: string, apiKey: string) : Promise<Result<null, string>> {
     try {
@@ -1171,7 +1189,11 @@ spoken_languages?: string[]; overlay_position?: OverlayPosition; debug_mode?: bo
  * When enabled, audio is transcribed by a hosted STT API instead of the
  * local engine. Users supply provider credentials in Settings.
  */
-cloud_stt_enabled?: boolean; cloud_stt_provider_id?: string; cloud_stt_api_keys?: SecretMap; cloud_stt_models?: Partial<{ [key in string]: string }>; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; 
+cloud_stt_enabled?: boolean; cloud_stt_provider_id?: string; cloud_stt_api_keys?: SecretMap; cloud_stt_models?: Partial<{ [key in string]: string }>; 
+/**
+ * Endpoint per provider; only the custom provider reads it.
+ */
+cloud_stt_base_urls?: Partial<{ [key in string]: string }>; mute_while_recording?: boolean; append_trailing_space?: boolean; app_language?: string; theme?: Theme; experimental_enabled?: boolean; lazy_stream_close?: boolean; 
 /**
  * Experimental, macOS only: move a Bluetooth headset (AirPods) to this
  * Mac while recording, so its microphone does not return silence while

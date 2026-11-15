@@ -1,12 +1,13 @@
 //! Cloud speech-to-text backends.
 //!
 //! Handy transcribes locally by default. This module adds an optional cloud
-//! path that bypasses the local engine entirely: audio streams to a hosted STT
+//! path that bypasses the local engine entirely: audio goes to a hosted STT
 //! API and the returned text re-enters the normal pipeline (filler removal,
 //! then LLM post-processing), so everything downstream is unchanged.
 //!
-//! Only Deepgram is implemented today, but the request struct is deliberately
-//! provider-shaped so a second backend slots in beside it.
+//! Two providers: Deepgram (streaming over WebSocket, batch fallback) and a
+//! custom OpenAI-compatible `/audio/transcriptions` endpoint (batch only),
+//! which is how self-hosted models are reached.
 
 use anyhow::{anyhow, Result};
 use log::{debug, warn};
@@ -15,6 +16,16 @@ use serde::Deserialize;
 use std::time::Duration;
 
 pub const DEEPGRAM_PROVIDER_ID: &str = "deepgram";
+/// Any server speaking OpenAI's `POST /audio/transcriptions` (multipart WAV in,
+/// `{"text": ...}` out): self-hosted Parakeet/Whisper servers, Groq, OpenAI.
+pub const CUSTOM_PROVIDER_ID: &str = "custom";
+
+/// Whether the provider takes the live-streaming path. Custom endpoints are
+/// batch only: the recording is sent once at key release.
+pub fn provider_streams(provider_id: &str) -> bool {
+    provider_id == DEEPGRAM_PROVIDER_ID
+}
+
 /// nova-3 streams over `/v1/listen` with interim results, takes keyterms, and
 /// is also what the batch fallback uses.
 pub const DEEPGRAM_DEFAULT_MODEL: &str = "nova-3";
@@ -56,8 +67,15 @@ const MAX_KEYTERMS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudSttRequest {
+    /// [`DEEPGRAM_PROVIDER_ID`] or [`CUSTOM_PROVIDER_ID`].
+    pub provider_id: String,
+    /// Custom provider only: the endpoint base (`http://host:8000/v1`) or the
+    /// full `.../audio/transcriptions` URL. Ignored for Deepgram.
+    pub base_url: String,
+    /// Empty means no `Authorization` header for the custom provider.
     pub api_key: String,
-    /// Deepgram model id, e.g. `nova-3`.
+    /// Deepgram model id (e.g. `nova-3`), or the `model` form field sent to a
+    /// custom endpoint (omitted when blank).
     pub model: String,
     /// Handy's language *intent* ("auto", "en", "fr", ...). "auto" becomes
     /// Deepgram's `multi`.
@@ -213,7 +231,7 @@ pub async fn transcribe_deepgram(req: &CloudSttRequest, audio: &[f32]) -> Result
 /// request gets its own OS thread with a private current-thread runtime. The
 /// caller still blocks, which is what the sync signature promises and what the
 /// local engine does anyway.
-pub fn transcribe_deepgram_blocking(req: &CloudSttRequest, audio: &[f32]) -> Result<String> {
+pub fn transcribe_blocking(req: &CloudSttRequest, audio: &[f32]) -> Result<String> {
     let req = req.clone();
     let audio = audio.to_vec();
 
@@ -222,10 +240,19 @@ pub fn transcribe_deepgram_blocking(req: &CloudSttRequest, audio: &[f32]) -> Res
             .enable_all()
             .build()
             .map_err(|e| anyhow!("Failed to start HTTP runtime: {}", e))?;
-        rt.block_on(transcribe_deepgram(&req, &audio))
+        rt.block_on(transcribe(&req, &audio))
     })
     .join()
-    .map_err(|_| anyhow!("Deepgram request thread panicked"))?
+    .map_err(|_| anyhow!("Cloud transcription request thread panicked"))?
+}
+
+/// One-shot transcription through whichever provider the request names.
+pub async fn transcribe(req: &CloudSttRequest, audio: &[f32]) -> Result<String> {
+    if req.provider_id == CUSTOM_PROVIDER_ID {
+        transcribe_custom(req, audio).await
+    } else {
+        transcribe_deepgram(req, audio).await
+    }
 }
 
 /// Check a Deepgram API key without sending audio. Listing the key's projects
@@ -255,6 +282,134 @@ pub async fn validate_deepgram_key(api_key: &str) -> Result<()> {
         )),
         status => Err(anyhow!("Deepgram returned HTTP {} while checking the key.", status)),
     }
+}
+
+/* ── Custom OpenAI-compatible endpoint ───────────────────────────────────── */
+
+const CUSTOM_MISSING_URL: &str =
+    "Custom transcription URL is not set. Add it in Settings → Models → Cloud Transcription.";
+/// Error bodies are surfaced to the user; cap them so an HTML error page
+/// doesn't flood the UI.
+const MAX_ERROR_BODY: usize = 300;
+
+/// Accept either the API base (`http://host:8000/v1`) or the full endpoint,
+/// since both are what people copy from server READMEs.
+fn custom_transcription_url(base_url: &str) -> Result<reqwest::Url> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err(anyhow!(CUSTOM_MISSING_URL));
+    }
+    let full = if base.ends_with("/audio/transcriptions") {
+        base.to_string()
+    } else {
+        format!("{base}/audio/transcriptions")
+    };
+    reqwest::Url::parse(&full)
+        .map_err(|e| anyhow!("Custom transcription URL '{}' is invalid: {}", base, e))
+}
+
+/// Mono 16-bit PCM WAV at Handy's sample rate: the one upload format every
+/// OpenAI-compatible server decodes.
+fn to_wav(audio: &[f32]) -> Vec<u8> {
+    let pcm = to_linear16(audio);
+    let data_len = pcm.len() as u32;
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+    wav.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    wav
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiTranscription {
+    text: String,
+}
+
+fn parse_custom_transcript(body: &str) -> Result<String> {
+    let parsed: OpenAiTranscription = serde_json::from_str(body).map_err(|e| {
+        anyhow!(
+            "Custom endpoint did not return OpenAI transcription JSON ({} bytes): {}",
+            body.len(),
+            e
+        )
+    })?;
+    Ok(parsed.text.trim().to_string())
+}
+
+fn clip(text: &str) -> &str {
+    match text.char_indices().nth(MAX_ERROR_BODY) {
+        Some((i, _)) => &text[..i],
+        None => text,
+    }
+}
+
+async fn transcribe_custom(req: &CloudSttRequest, audio: &[f32]) -> Result<String> {
+    let url = custom_transcription_url(&req.base_url)?;
+    let file = reqwest::multipart::Part::bytes(to_wav(audio))
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", file)
+        .text("response_format", "json");
+    let model = req.model.trim();
+    if !model.is_empty() {
+        form = form.text("model", model.to_string());
+    }
+    match req.language.trim() {
+        "" | "auto" => {}
+        language => form = form.text("language", language.to_string()),
+    }
+    debug!(
+        "Custom STT request to {}: {:.2}s of audio",
+        url,
+        audio.len() as f32 / SAMPLE_RATE as f32
+    );
+
+    let mut request = reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .build()?
+        .post(url.clone())
+        .multipart(form);
+    let api_key = req.api_key.trim();
+    if !api_key.is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not reach the custom endpoint {}: {}", url, e))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| anyhow!("Failed to read the custom endpoint's response: {}", e))?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "Custom endpoint returned {}: {}",
+            status,
+            clip(text.trim())
+        ));
+    }
+    parse_custom_transcript(&text)
+}
+
+/// Check a custom endpoint end to end: half a second of silence must come
+/// back as a transcription response. There is no standard key-check call, and
+/// this also proves the URL, the model name and the response format.
+pub async fn validate_custom_endpoint(req: &CloudSttRequest) -> Result<()> {
+    let silence = vec![0.0f32; SAMPLE_RATE as usize / 2];
+    transcribe_custom(req, &silence).await.map(|_| ())
 }
 
 /* ── Streaming (Deepgram live WebSocket) ─────────────────────────────────── */
@@ -288,7 +443,7 @@ enum WsCmd {
 /// Deepgram has already transcribed everything but the last moment of audio.
 ///
 /// Owns an OS thread with a private current-thread runtime, for the same reason
-/// [`transcribe_deepgram_blocking`] does: the callers are synchronous and may
+/// [`transcribe_blocking`] does: the callers are synchronous and may
 /// themselves be running on a Tauri runtime worker.
 pub struct DeepgramLiveStream {
     cmd_tx: tokio::sync::mpsc::UnboundedSender<WsCmd>,
@@ -854,11 +1009,49 @@ mod tests {
 
     fn req() -> CloudSttRequest {
         CloudSttRequest {
+            provider_id: DEEPGRAM_PROVIDER_ID.to_string(),
+            base_url: String::new(),
             api_key: "k".to_string(),
             model: "nova-3".to_string(),
             language: "auto".to_string(),
             keyterms: vec![],
         }
+    }
+
+    #[test]
+    fn custom_url_accepts_base_or_full_endpoint() {
+        let expected = "http://spc:8000/v1/audio/transcriptions";
+        for input in [
+            "http://spc:8000/v1",
+            " http://spc:8000/v1/ ",
+            "http://spc:8000/v1/audio/transcriptions",
+            "http://spc:8000/v1/audio/transcriptions/",
+        ] {
+            assert_eq!(custom_transcription_url(input).unwrap().as_str(), expected);
+        }
+        assert!(custom_transcription_url("  ").is_err());
+    }
+
+    #[test]
+    fn wav_header_describes_the_pcm_that_follows() {
+        let wav = to_wav(&[0.0; 160]);
+        assert_eq!(wav.len(), 44 + 320);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 36 + 320);
+        assert_eq!(
+            u32::from_le_bytes(wav[24..28].try_into().unwrap()),
+            SAMPLE_RATE
+        );
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 320);
+    }
+
+    #[test]
+    fn custom_transcript_parses_openai_json() {
+        assert_eq!(
+            parse_custom_transcript(r#"{"text":" Hello there. "}"#).unwrap(),
+            "Hello there."
+        );
+        assert!(parse_custom_transcript("<html>502</html>").is_err());
     }
 
     #[test]
@@ -1225,7 +1418,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let result = outer.block_on(async { transcribe_deepgram_blocking(&r, &[0.0; 16]) });
+        let result = outer.block_on(async { transcribe_blocking(&r, &[0.0; 16]) });
 
         let err = result.expect_err("empty key should be rejected");
         assert!(

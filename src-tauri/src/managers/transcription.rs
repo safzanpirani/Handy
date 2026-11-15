@@ -1246,6 +1246,10 @@ impl TranscriptionManager {
         let Ok(req) = cloud_request(&settings) else {
             return;
         };
+        // Batch-only providers have no socket to warm.
+        if !crate::stt_cloud::provider_streams(&req.provider_id) {
+            return;
+        }
         // Don't race a live dictation for the socket, and don't stack pre-warms.
         if self.active_stream_worker.load(Ordering::Acquire) != 0 {
             return;
@@ -1332,14 +1336,14 @@ impl TranscriptionManager {
         Some(prewarmed.stream)
     }
 
-    /// Batch transcription through the configured cloud provider: the
-    /// fallback when streaming failed, and every batch run (a re-transcribed
-    /// history entry, a CLI file) while cloud STT is on. Custom words go to
-    /// Deepgram as keyterms.
+    /// Batch transcription through the configured cloud provider: the only
+    /// path for a custom endpoint, the fallback when Deepgram streaming
+    /// failed, and every batch run (a re-transcribed history entry, a CLI
+    /// file) while cloud STT is on. Custom words go to Deepgram as keyterms.
     fn transcribe_cloud(&self, audio: &[f32], settings: &AppSettings) -> Result<RunOutcome> {
         let started = Instant::now();
         let req = cloud_request(settings)?;
-        let text = crate::stt_cloud::transcribe_deepgram_blocking(&req, audio)?;
+        let text = crate::stt_cloud::transcribe_blocking(&req, audio)?;
         info!("Cloud transcription took {:?}", started.elapsed());
         Ok(RunOutcome {
             setup: cloud_setup(settings),
@@ -1954,15 +1958,26 @@ fn transcribe_cpp_run_plan(
 
 /// Build the provider request shared by the streaming and batch cloud paths.
 fn cloud_request(settings: &AppSettings) -> Result<crate::stt_cloud::CloudSttRequest> {
+    use crate::stt_cloud::{CUSTOM_PROVIDER_ID, DEEPGRAM_DEFAULT_MODEL, DEEPGRAM_PROVIDER_ID};
     let provider_id = settings.cloud_stt_provider_id.as_str();
-    if provider_id != crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
-        return Err(anyhow::anyhow!(
-            "Unknown cloud transcription provider '{}'",
-            provider_id
-        ));
-    }
+    let default_model = match provider_id {
+        DEEPGRAM_PROVIDER_ID => DEEPGRAM_DEFAULT_MODEL,
+        CUSTOM_PROVIDER_ID => "",
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Unknown cloud transcription provider '{}'",
+                provider_id
+            ))
+        }
+    };
 
     Ok(crate::stt_cloud::CloudSttRequest {
+        provider_id: provider_id.to_string(),
+        base_url: settings
+            .cloud_stt_base_urls
+            .get(provider_id)
+            .cloned()
+            .unwrap_or_default(),
         api_key: settings
             .cloud_stt_api_keys
             .get(provider_id)
@@ -1972,7 +1987,7 @@ fn cloud_request(settings: &AppSettings) -> Result<crate::stt_cloud::CloudSttReq
             .cloud_stt_models
             .get(provider_id)
             .cloned()
-            .unwrap_or_else(|| crate::stt_cloud::DEEPGRAM_DEFAULT_MODEL.to_string()),
+            .unwrap_or_else(|| default_model.to_string()),
         language: settings.selected_language.clone(),
         keyterms: settings.custom_words.clone(),
     })

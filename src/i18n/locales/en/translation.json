@@ -907,7 +907,34 @@
       "title": "Cloud Transcription",
       "toggle": {
         "label": "Use cloud transcription",
-        "description": "Stream audio to Deepgram instead of running a model locally. No model download is needed, but every dictation needs a network connection and the audio leaves your machine. Live preview works in this mode."
+        "description": "Send audio to a transcription service instead of running a model locally: Deepgram, or your own server. No model download is needed, but every dictation needs a network connection and the audio leaves your machine."
+      },
+      "provider": {
+        "title": "Service",
+        "description": "Deepgram streams as you speak and shows a live preview. A custom endpoint is any server with an OpenAI-compatible /audio/transcriptions API, such as a self-hosted model; it transcribes once you stop recording.",
+        "deepgram": {
+          "label": "Deepgram",
+          "hint": "Streaming, live preview"
+        },
+        "custom": {
+          "label": "Custom endpoint",
+          "hint": "OpenAI-compatible, e.g. a self-hosted model"
+        }
+      },
+      "customUrl": {
+        "title": "Endpoint URL",
+        "description": "The API base (for example http://server:8000/v1) or the full .../audio/transcriptions URL.",
+        "placeholder": "http://server:8000/v1"
+      },
+      "customKey": {
+        "title": "API key (optional)",
+        "description": "Sent as a Bearer token. Leave blank if your server needs no key.",
+        "placeholder": "Leave blank if not needed",
+        "test": "Test"
+      },
+      "customModel": {
+        "description": "Sent as the model field. Leave blank to use the server's default.",
+        "placeholder": "Server default"
       },
       "apiKey": {
         "title": "Deepgram API key",

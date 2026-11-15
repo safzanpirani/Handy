@@ -1405,13 +1405,12 @@ pub fn change_vad_enabled_setting(app: AppHandle, enabled: bool) -> Result<(), S
 }
 
 fn validate_cloud_stt_provider(provider_id: &str) -> Result<(), String> {
-    if provider_id == crate::stt_cloud::DEEPGRAM_PROVIDER_ID {
-        Ok(())
-    } else {
-        Err(format!(
+    match provider_id {
+        crate::stt_cloud::DEEPGRAM_PROVIDER_ID | crate::stt_cloud::CUSTOM_PROVIDER_ID => Ok(()),
+        _ => Err(format!(
             "Unknown cloud transcription provider '{}'",
             provider_id
-        ))
+        )),
     }
 }
 
@@ -1432,6 +1431,36 @@ pub fn change_cloud_stt_enabled_setting(app: AppHandle, enabled: bool) -> Result
     settings.cloud_stt_enabled = enabled;
     settings::write_settings(&app, settings);
     refresh_cloud_prewarm(&app);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_provider_setting(
+    app: AppHandle,
+    provider_id: String,
+) -> Result<(), String> {
+    validate_cloud_stt_provider(&provider_id)?;
+    let mut settings = settings::get_settings(&app);
+    settings.cloud_stt_provider_id = provider_id;
+    settings::write_settings(&app, settings);
+    refresh_cloud_prewarm(&app);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_cloud_stt_base_url_setting(
+    app: AppHandle,
+    provider_id: String,
+    base_url: String,
+) -> Result<(), String> {
+    validate_cloud_stt_provider(&provider_id)?;
+    let mut settings = settings::get_settings(&app);
+    settings
+        .cloud_stt_base_urls
+        .insert(provider_id, base_url.trim().to_string());
+    settings::write_settings(&app, settings);
     Ok(())
 }
 
@@ -1469,11 +1498,39 @@ pub fn change_cloud_stt_model_setting(
     Ok(())
 }
 
-/// Check an API key against the provider without sending audio.
+/// Check provider credentials. Deepgram's key is checked without audio; a
+/// custom endpoint gets half a second of silence using the saved URL and model
+/// with the key being tested.
 #[tauri::command]
 #[specta::specta]
-pub async fn test_cloud_stt_api_key(provider_id: String, api_key: String) -> Result<(), String> {
+pub async fn test_cloud_stt_api_key(
+    app: AppHandle,
+    provider_id: String,
+    api_key: String,
+) -> Result<(), String> {
     validate_cloud_stt_provider(&provider_id)?;
+    if provider_id == crate::stt_cloud::CUSTOM_PROVIDER_ID {
+        let settings = settings::get_settings(&app);
+        let req = crate::stt_cloud::CloudSttRequest {
+            base_url: settings
+                .cloud_stt_base_urls
+                .get(&provider_id)
+                .cloned()
+                .unwrap_or_default(),
+            model: settings
+                .cloud_stt_models
+                .get(&provider_id)
+                .cloned()
+                .unwrap_or_default(),
+            provider_id,
+            api_key: api_key.trim().to_string(),
+            language: settings.selected_language,
+            keyterms: Vec::new(),
+        };
+        return crate::stt_cloud::validate_custom_endpoint(&req)
+            .await
+            .map_err(|e| e.to_string());
+    }
     crate::stt_cloud::validate_deepgram_key(&api_key)
         .await
         .map_err(|e| e.to_string())
