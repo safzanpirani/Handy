@@ -140,6 +140,9 @@ struct Route {
     /// Set by `cancel_stream`, so the worker drops audio still queued ahead
     /// of the `Cancel` instead of decoding it.
     cancelled: Arc<AtomicBool>,
+    /// Set when the route is taken for the final `Finalize`/`Cancel`, before
+    /// the worker reaches it behind queued frames.
+    closed: Arc<AtomicBool>,
 }
 
 impl StreamRouter {
@@ -151,24 +154,30 @@ impl StreamRouter {
     }
 
     /// Open a fresh command channel for a new streaming session, returning the
-    /// receiver the worker should drain and its cancel flag. Caller must
-    /// ensure no prior channel is still open.
-    fn open(&self) -> (mpsc::Receiver<StreamCmd>, Arc<AtomicBool>) {
+    /// receiver the worker should drain, its cancel flag and its closed flag.
+    /// Caller must ensure no prior channel is still open.
+    fn open(&self) -> (mpsc::Receiver<StreamCmd>, Arc<AtomicBool>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel::<StreamCmd>();
         let cancelled = Arc::new(AtomicBool::new(false));
+        let closed = Arc::new(AtomicBool::new(false));
         *self.route.lock().unwrap() = Some(Route {
             tx,
             cancelled: Arc::clone(&cancelled),
+            closed: Arc::clone(&closed),
         });
         self.open.store(true, Ordering::Relaxed);
-        (rx, cancelled)
+        (rx, cancelled, closed)
     }
 
     /// Take the route out (closing the channel to new feeds), so the caller
     /// can send the final `Finalize`/`Cancel` command.
     fn take(&self) -> Option<Route> {
         self.open.store(false, Ordering::Relaxed);
-        self.route.lock().unwrap().take()
+        let route = self.route.lock().unwrap().take();
+        if let Some(route) = &route {
+            route.closed.store(true, Ordering::Release);
+        }
+        route
     }
 
     /// Drop the channel and mark closed without sending a final command (used
@@ -857,7 +866,7 @@ impl TranscriptionManager {
             warn!("start_stream lost a race with another stream worker");
             return;
         }
-        let (rx, cancelled) = self.router.open();
+        let (rx, cancelled, closed) = self.router.open();
         self.stream_active.store(false, Ordering::Release);
 
         let manager = self.clone();
@@ -868,7 +877,7 @@ impl TranscriptionManager {
         let cloud_streams = crate::stt_cloud::provider_streams(&settings.cloud_stt_provider_id);
         thread::spawn(move || match (cloud, cloud_streams) {
             (true, true) => manager.run_cloud_stream_worker(rx, cancelled, worker_id),
-            (true, false) => manager.run_cloud_preview_worker(rx, cancelled, worker_id),
+            (true, false) => manager.run_cloud_preview_worker(rx, cancelled, closed, worker_id),
             (false, _) => manager.run_stream_worker(rx, cancelled, worker_id),
         });
     }

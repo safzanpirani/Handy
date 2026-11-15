@@ -7,18 +7,20 @@
 //! without previews.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::anyhow;
 use log::{debug, info, warn};
-use tauri::async_runtime::JoinHandle;
+use tokio::sync::oneshot;
 
 use super::{
     cloud_request, drain_until_finalize, emit_stream_text, StreamCmd, StreamWorkerGuard,
     TranscriptionManager,
 };
 use crate::settings::get_settings;
+use crate::stt_cloud::CloudSttRequest;
 
 /// Fluid Speech Pro on server-pc answered 2-20 s prefixes in 0.1-0.4 s, so a
 /// request every 0.7 s keeps the preview within about a second of speech while
@@ -77,11 +79,17 @@ type PreviewResult = (usize, anyhow::Result<String>);
 impl TranscriptionManager {
     /// Collects the recording's frames and keeps one preview request in
     /// flight over them, emitting each newer answer to the overlay. Finalize
-    /// and cancel abort the request in flight instead of waiting for it.
+    /// and cancel drop the request in flight instead of waiting for it.
+    ///
+    /// `closed` is set when the recording is released or cancelled, before
+    /// the `Finalize`/`Cancel` is queued behind its last frames; from then on
+    /// nothing is emitted, so a late preview can't overwrite the final text
+    /// or the next recording's overlay.
     pub(super) fn run_cloud_preview_worker(
         &self,
         rx: mpsc::Receiver<StreamCmd>,
         cancelled: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
         worker_id: u64,
     ) {
         let _worker = StreamWorkerGuard {
@@ -106,33 +114,42 @@ impl TranscriptionManager {
         let (done_tx, done_rx) = mpsc::channel::<PreviewResult>();
         let mut audio: Vec<f32> = Vec::new();
         let mut schedule = PreviewSchedule::new(Instant::now());
-        let mut in_flight: Option<JoinHandle<()>> = None;
+        // Dropping it cancels the request in flight (see `spawn_preview`).
+        let mut in_flight: Option<oneshot::Sender<()>> = None;
 
         loop {
-            match rx.recv_timeout(TICK) {
-                Ok(StreamCmd::Feed(pcm)) => {
-                    if cancelled.load(Ordering::Acquire) {
-                        continue;
+            // Every queued command before any finished preview, so a
+            // Finalize or Cancel behind frames ends the session first.
+            let mut next = rx.recv_timeout(TICK);
+            while let Ok(cmd) = next {
+                match cmd {
+                    StreamCmd::Feed(pcm) => {
+                        // Audio queued ahead of a cancel is dropped.
+                        if !cancelled.load(Ordering::Acquire) {
+                            self.touch_activity();
+                            audio.extend_from_slice(&pcm);
+                        }
                     }
-                    self.touch_activity();
-                    audio.extend_from_slice(&pcm);
+                    StreamCmd::Finalize { reply, .. } => {
+                        drop(in_flight.take());
+                        let _ = reply.send(Ok(None));
+                        return;
+                    }
+                    StreamCmd::Cancel => return,
                 }
-                Ok(StreamCmd::Finalize { reply, .. }) => {
-                    abort_preview(in_flight.take());
-                    let _ = reply.send(Ok(None));
-                    return;
-                }
-                Ok(StreamCmd::Cancel) | Err(RecvTimeoutError::Disconnected) => {
-                    abort_preview(in_flight.take());
-                    return;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
+                next = rx.try_recv().map_err(|e| match e {
+                    TryRecvError::Empty => RecvTimeoutError::Timeout,
+                    TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                });
+            }
+            if matches!(next, Err(RecvTimeoutError::Disconnected)) {
+                return;
             }
 
             while let Ok((samples, result)) = done_rx.try_recv() {
                 in_flight = None;
                 match result {
-                    Ok(text) if schedule.accept(samples) => {
+                    Ok(text) if !closed.load(Ordering::Acquire) && schedule.accept(samples) => {
                         emit_stream_text(&self.app_handle, "", &text)
                     }
                     Ok(_) => debug!("Dropped a stale cloud preview ({} samples)", samples),
@@ -141,29 +158,49 @@ impl TranscriptionManager {
             }
 
             let now = Instant::now();
-            if cancelled.load(Ordering::Acquire)
+            if closed.load(Ordering::Acquire)
                 || !schedule.due(now, audio.len(), in_flight.is_some())
             {
                 continue;
             }
             schedule.sent(now, audio.len());
-            let req = req.clone();
-            let snapshot = audio.clone();
-            let done = done_tx.clone();
-            in_flight = Some(tauri::async_runtime::spawn(async move {
-                let result = crate::stt_cloud::transcribe(&req, &snapshot).await;
-                let _ = done.send((snapshot.len(), result));
-            }));
+            in_flight = Some(spawn_preview(req.clone(), audio.clone(), done_tx.clone()));
         }
     }
 }
 
-/// Drop the preview request in flight, closing its connection, so it neither
-/// delays the final request nor reaches the overlay.
-fn abort_preview(in_flight: Option<JoinHandle<()>>) {
-    if let Some(handle) = in_flight {
-        handle.abort();
-    }
+/// Runs one preview request on its own thread and runtime, so cancelling it
+/// never waits on the app's runtime, where the stop task blocks a thread on
+/// the final request. Dropping the returned sender cancels the request: its
+/// future, client and connection are dropped right away on this thread.
+fn spawn_preview(
+    req: CloudSttRequest,
+    audio: Vec<f32>,
+    done: mpsc::Sender<PreviewResult>,
+) -> oneshot::Sender<()> {
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        let samples = audio.len();
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = done.send((samples, Err(anyhow!("No HTTP runtime: {}", e))));
+                return;
+            }
+        };
+        rt.block_on(async {
+            tokio::select! {
+                result = crate::stt_cloud::transcribe(&req, &audio) => {
+                    let _ = done.send((samples, result));
+                }
+                _ = cancel_rx => {}
+            }
+        });
+    });
+    cancel_tx
 }
 
 #[cfg(test)]
