@@ -938,7 +938,7 @@
       },
       "customPreview": {
         "label": "Live preview",
-        "description": "While you speak, send the audio so far to your server every 0.7 seconds and show what it hears. Each preview is a full request, so this adds load on the server. The final text still comes from one request once you stop."
+        "description": "While you speak, send the audio so far to your server every 0.25 seconds and show what it hears. Each preview is a full request, so this adds load on the server. The final text still comes from one request once you stop."
       },
       "apiKey": {
         "title": "Deepgram API key",

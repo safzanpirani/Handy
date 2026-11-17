@@ -22,12 +22,13 @@ use super::{
 use crate::settings::get_settings;
 use crate::stt_cloud::CloudSttRequest;
 
-/// Fluid Speech Pro on server-pc answered 2-20 s prefixes in 0.1-0.4 s, so a
-/// request every 0.7 s keeps the preview within about a second of speech while
-/// leaving the server idle most of the time for the final request.
-const PREVIEW_INTERVAL: Duration = Duration::from_millis(700);
-/// 300 ms at 16 kHz: less new audio than this rarely changes the text.
-const MIN_NEW_SAMPLES: usize = 4_800;
+/// Fluid Speech Pro on server-pc answers 2-20 s prefixes in 0.05-0.25 s, so a
+/// request every 0.25 s keeps the preview close behind speech. Only one
+/// request is in flight at a time, so a slow answer stretches the cadence
+/// instead of queueing requests.
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
+/// 250 ms at 16 kHz, matching the interval so speech never holds a preview back.
+const MIN_NEW_SAMPLES: usize = 4_000;
 /// How long the worker waits for a frame before checking for a due preview
 /// or a returned one. VAD drops silence, so frames can stop for a while.
 const TICK: Duration = Duration::from_millis(50);
