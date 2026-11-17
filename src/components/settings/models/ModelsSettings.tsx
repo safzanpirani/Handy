@@ -137,7 +137,7 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({
       ];
 
   return (
-    <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
+    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col">
       {/* The title, and across from it where to change the languages the
           grades are for. */}
       <div className="mb-[16px] flex flex-none items-center justify-between gap-[12px] px-[12px]">
@@ -159,28 +159,35 @@ export const ModelsSettings: React.FC<ModelsSettingsProps> = ({
       <div className="mx-[12px] mb-[16px] flex-none empty:hidden">
         <RetiredModelsNotice />
       </div>
-      <ModelTable
-        grading={facts}
-        filters={filters}
-        setFilters={setFilters}
-        // "Yours" always shows at rest; a search hides empty sections.
-        sections={sections.filter(
-          (s) => s.rows.length || (s.key === "yours" && !searching),
-        )}
-        renderRow={(e) => <ModelRow key={e.id} entry={e} />}
-        actionsHead={<Legend tier={facts.tier} />}
-        footer={
-          !searching &&
-          lists.untested.length > 0 && (
-            <Note>
-              {t("settings.models.untestedHidden", {
-                count: lists.untested.length,
-              })}
-            </Note>
-          )
-        }
-        thinEdge
-      />
+      {/* The cloud card above can take most of a short window. The table keeps
+          room for its search and a few rows, and the settings page scrolls to
+          reach it instead of squeezing it to nothing. Size containment stops
+          the table's rows from counting toward the page height, so a tall
+          window still scrolls the table, not the page. */}
+      <div className="flex min-h-[360px] flex-1 flex-col [contain:size]">
+        <ModelTable
+          grading={facts}
+          filters={filters}
+          setFilters={setFilters}
+          // "Yours" always shows at rest; a search hides empty sections.
+          sections={sections.filter(
+            (s) => s.rows.length || (s.key === "yours" && !searching),
+          )}
+          renderRow={(e) => <ModelRow key={e.id} entry={e} />}
+          actionsHead={<Legend tier={facts.tier} />}
+          footer={
+            !searching &&
+            lists.untested.length > 0 && (
+              <Note>
+                {t("settings.models.untestedHidden", {
+                  count: lists.untested.length,
+                })}
+              </Note>
+            )
+          }
+          thinEdge
+        />
+      </div>
     </div>
   );
 };

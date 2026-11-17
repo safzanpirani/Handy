@@ -333,9 +333,11 @@ function App() {
           {/* Scrollable content area */}
           <div className="flex-1 flex flex-col overflow-hidden">
             <div ref={settingsScrollRef} className="flex-1 overflow-y-auto">
-              {/* Models fills the window: its table scrolls, not the page. */}
+              {/* Models fills the window and its table scrolls. When the
+                  window is too short for the table's minimum, the page grows
+                  and scrolls instead. */}
               <div
-                className={`flex flex-col items-center p-4 gap-4 ${currentSection === "models" ? "h-full" : ""}`}
+                className={`flex flex-col items-center p-4 gap-4 ${currentSection === "models" ? "min-h-full" : ""}`}
               >
                 <SecureInputWarning />
                 {renderSettingsContent(
